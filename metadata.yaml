@@ -1,0 +1,7 @@
+name: astrbot_plugin_livingmemory
+display_name: LivingMemory（对话线隔离版）
+author: lxfight
+version: 2.9.1
+desc: 为 AstrBot 打造的、拥有完整记忆生命周期的智能长期记忆插件（社区修改版：新增对话线 Conversation ID 隔离维度，原作为 lxfight 的 astrbot_plugin_livingmemory v2.9.0，AGPL-3.0）。
+short_desc: 长期记忆插件（社区改版：新增对话线隔离）
+repo: https://github.com/alva-lorenz-nl/astrbot_plugin_livingmemory
