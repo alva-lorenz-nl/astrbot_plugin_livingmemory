@@ -7,8 +7,8 @@
 <p align="center">
   <a href="https://lxfight-s-astrbot-plugins.github.io/astrbot_plugin_livingmemory/"><strong>使用文档</strong></a> ·
   <a href="https://lxfight-s-astrbot-plugins.github.io/astrbot_plugin_livingmemory/webui"><strong>管理界面</strong></a> ·
-  <a href="https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/releases"><strong>版本下载</strong></a> ·
-  <a href="https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/issues"><strong>问题反馈</strong></a>
+  <a href="https://github.com/alva-lorenz-nl/astrbot_plugin_livingmemory/commits/main"><strong>版本记录</strong></a> ·
+  <a href="https://github.com/alva-lorenz-nl/astrbot_plugin_livingmemory/issues"><strong>问题反馈</strong></a>
 </p>
 
 <p align="center">
@@ -17,13 +17,20 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0-52675c?style=flat-square" alt="AGPL-3.0"></a>
 </p>
 
+> [!IMPORTANT]
+> **本仓库是社区修改版 —— 对话线（Conversation ID）隔离版，不是官方上游。**
+> 代码基于原作者 lxfight 的 [astrbot_plugin_livingmemory](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory) **v2.13.0**，并在其上重新移植了对话线记忆隔离：写入、召回、反思与图谱都按 `conversation_id` 分域，不同会话（不同群、私聊、不同话题线）之间的记忆不会互相串味。
+> 版本号标为 **2.13.1**；上游后续更新需要手动合并，请勿把本仓库的 Issue 提给原作者。
+>
+> **安装方式**：在 AstrBot 插件管理中选择「从 URL 安装」，填入 `https://github.com/alva-lorenz-nl/astrbot_plugin_livingmemory`；或克隆到 AstrBot 的 `data/plugins/` 目录后重启，并补装 `requirements.txt` 中的依赖。
+
 ## 让对话留下有用的记忆
 
 LivingMemory 为 AstrBot 保存长期偏好、人物关系、项目进展和历史约定。它从对话中整理记忆，在需要时结合关键词、语义和图谱召回，并通过归档、衰减和访问强化管理记忆生命周期。
 
-> **最新稳定版：2.10.0**<br>
-> 修正召回噪声与保留策略，降低总结与注入成本，并新增数据体检与质量回归门禁。<br>
-> [下载 2.10.0](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/releases/tag/2.10.0) · [版本与升级](https://lxfight-s-astrbot-plugins.github.io/astrbot_plugin_livingmemory/releases) · [历史版本](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/releases)
+> **本仓库当前版本：2.13.1（社区对话线隔离版）**<br>
+> 以 2.13.0 为基线重新移植对话线隔离，其余功能与上游一致。<br>
+> [提交记录](https://github.com/alva-lorenz-nl/astrbot_plugin_livingmemory/commits/main) · [问题反馈（本仓库）](https://github.com/alva-lorenz-nl/astrbot_plugin_livingmemory/issues) · [上游仓库](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory)
 
 ## 从记住，到想起来
 
@@ -31,6 +38,13 @@ LivingMemory 为 AstrBot 保存长期偏好、人物关系、项目进展和历�
 - **按上下文召回** — 文档与图谱都支持关键词和向量检索，融合排序后结合会话、人格和生命周期筛选。
 - **主动回忆与写入** — Agent 可调用 `recall_long_term_memory` 和 `memorize_long_term_memory`，按需读写长期记忆。
 - **看得见、可维护** — 在官方插件视图中浏览 2D/3D 图谱、点击节点变焦并查看关联记忆，以及编辑记忆、测试召回、管理提示词和查看系统状态。
+
+## 与上游的差异
+
+- **对话线维度**：记忆的写入、召回、反思、归档与图谱查询都会带上 `conversation_id`，同一人格在不同会话里的记忆互不干扰。
+- **升级路径**：以 2.13.0 为基线重新移植，数据库结构只做增量字段补充，首次启动自动迁移，不需要重建索引。
+- **其余功能**：命令、配置项、注入格式与上游保持一致，可以对照上游文档使用。
+- **维护方式**：上游发布新版本后，本仓库不会自动跟随，需要手动合并后再发版。
 
 ## 一个工作区，四种风格
 

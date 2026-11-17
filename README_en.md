@@ -7,8 +7,8 @@
 <p align="center">
   <a href="https://lxfight-s-astrbot-plugins.github.io/astrbot_plugin_livingmemory/en/"><strong>Documentation</strong></a> ·
   <a href="https://lxfight-s-astrbot-plugins.github.io/astrbot_plugin_livingmemory/en/webui"><strong>Dashboard</strong></a> ·
-  <a href="https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/releases"><strong>Downloads</strong></a> ·
-  <a href="https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/issues"><strong>Issues</strong></a>
+  <a href="https://github.com/alva-lorenz-nl/astrbot_plugin_livingmemory/commits/main"><strong>Commits</strong></a> ·
+  <a href="https://github.com/alva-lorenz-nl/astrbot_plugin_livingmemory/issues"><strong>Issues</strong></a>
 </p>
 
 <p align="center">
@@ -16,6 +16,13 @@
   <img src="https://img.shields.io/badge/AstrBot-4.24.2%2B-52675c?style=flat-square" alt="Plugin views require AstrBot 4.24.2 or later">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0-52675c?style=flat-square" alt="AGPL-3.0"></a>
 </p>
+
+> [!IMPORTANT]
+> **This repository is a community fork — the Conversation-ID-isolated build, not the official upstream.**
+> It is based on lxfight's [astrbot_plugin_livingmemory](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory) **v2.13.0**, with conversation-line memory isolation re-applied on top: writes, recall, reflection and graph queries are all scoped by `conversation_id`, so memories from different sessions (groups, private chats, separate threads) no longer bleed into each other.
+> The version is labelled **2.13.1**; upstream updates must be merged manually. Please do not file issues about this fork with the original author.
+>
+> **Install**: use "Install from URL" in AstrBot's plugin manager with `https://github.com/alva-lorenz-nl/astrbot_plugin_livingmemory`, or clone it into `data/plugins/`, install `requirements.txt`, and restart.
 
 ## Keep what matters from a conversation
 
@@ -31,6 +38,13 @@ LivingMemory gives AstrBot a durable store of preferences, relationships, projec
 - **Context-aware recall** — Document and graph routes combine keyword and vector retrieval, rank fusion, scope filtering and lifecycle checks.
 - **Agent tools** — `recall_long_term_memory` and `memorize_long_term_memory` let the agent read and write long-term memory when needed.
 - **Visible and maintainable** — Browse 2D/3D graphs, zoom into nodes and inspect their memories, edit memories, test recall, manage prompts and inspect system status in official Plugin Views.
+
+## Differences from upstream
+
+- **Conversation scope**: memory writes, recall, reflection, archiving and graph queries all carry `conversation_id`, so one persona's memories stay separated per session.
+- **Upgrade path**: re-applied on the 2.13.0 baseline; the schema only gains additive fields and migrates automatically on first start — no index rebuild needed.
+- **Everything else**: commands, config keys and injection format match upstream, so the upstream docs still apply.
+- **Maintenance**: this fork does not auto-follow upstream releases; merges are done by hand.
 
 ## One workspace, four styles
 
