@@ -14,7 +14,7 @@ hero:
       text: 快速开始
       link: /guide/getting-started
     - theme: alt
-      text: 2.9.0 稳定版
+      text: 2.13.0 稳定版
       link: /releases
 features:
   - title: 自动长期记忆
@@ -26,7 +26,7 @@ features:
   - title: 时间感知生命周期
     details: 记忆原子拥有 TTL、衰减、访问强化和自动清理机制。
   - title: 四种风格的管理界面
-    details: Editorial、Studio、Paper、Terminal；支持明暗切换、稳定图谱阅读与清晰的编辑和导入流程。
+    details: macOS 26 Liquid Glass、Studio、Paper、Terminal；支持明暗切换、自定义强调色、壁纸与 CSS，以及清晰的编辑和导入流程。
   - title: 数据安全
     details: 支持版本备份、迁移前备份、索引回滚和事务删除。
 ---
@@ -43,9 +43,9 @@ flowchart LR
     ENGINE --> API["Dashboard 与 Agent 工具"]
 ```
 
-## 2.9.0 已发布
+## 2.13.0 已发布
 
-2.9.0 新增按适配器实例配置互通和旧记忆归属迁移，修复超大总结片段、历史保留上限及整合隔离。会话与人格过滤继续按配置生效；升级前请备份原始对话，并留意严格消息上限的淘汰行为。[版本与升级](/releases)提供下载、迁移和配置说明。
+2.13.0 是 Dashboard 外观版本：默认外观升级到 macOS 26 Liquid Glass，外观面板支持自定义强调色、壁纸、玻璃强度、圆角、密度与字体，并完成一轮样式收敛与修复；首屏 gzip 81,597 B 仍在预算内。无命令、配置或数据库迁移变化。[版本与升级](/releases)提供下载和升级说明。
 
 ## 这份文档适合谁？
 

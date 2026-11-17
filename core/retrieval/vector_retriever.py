@@ -5,9 +5,12 @@
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from ..faiss_async_persist import get_async_persister
+from ..memory_scope import normalize_memory_scopes
 from .vector_search import retrieve_vectors
 
 if TYPE_CHECKING:
@@ -116,7 +119,11 @@ class VectorRetriever:
         return content[:head_chars] + _TRUNCATED_CONTENT_MARKER + content[-tail_chars:]
 
     async def add_document(
-        self, content: str, metadata: dict[str, Any] | None = None
+        self,
+        content: str,
+        metadata: dict[str, Any] | None = None,
+        *,
+        embedding: list[float] | None = None,
     ) -> int:
         """
         添加文档到向量库
@@ -125,6 +132,9 @@ class VectorRetriever:
             content: 文档内容
             metadata: 文档元数据(必须包含:importance, create_time, last_access_time,
                      session_id, persona_id)
+            embedding: 可选预计算向量（同一文本在做近重复检测时已算过 embedding 的
+                场景直接复用，避免重复调用 Embedding Provider）；为 None 时按原路径
+                由宿主向量库生成向量。
 
         Returns:
             int: 文档ID
@@ -166,7 +176,9 @@ class VectorRetriever:
                 insert_content,
                 _MAX_CONTENT_CHARS,
             )
-        if insert_content == content:
+
+        # 无预计算向量且无需截断时，沿用宿主向量库的完整插入路径
+        if embedding is None and insert_content == content:
             return await self.faiss_db.insert(content=content, metadata=metadata)
 
         # The document is the source of truth; only the embedding input is bounded.
@@ -175,10 +187,11 @@ class VectorRetriever:
 
         import numpy as np
 
-        vector = np.asarray(
-            await self.faiss_db.embedding_provider.get_embedding(insert_content),
-            dtype=np.float32,
-        )
+        if embedding is None:
+            embedding = await self.faiss_db.embedding_provider.get_embedding(
+                insert_content
+            )
+        vector = np.asarray(embedding, dtype=np.float32)
         storage = self.faiss_db.embedding_storage
         if vector.ndim != 1 or vector.shape[0] != storage.dimension:
             raise ValueError("Embedding dimension does not match the vector index")
@@ -234,8 +247,9 @@ class VectorRetriever:
 
         # 构建元数据过滤器
         metadata_filters = {}
-        if session_id is not None:
-            metadata_filters["session_id"] = session_id
+        scopes = normalize_memory_scopes(session_id)
+        if scopes is not None:
+            metadata_filters["session_id"] = scopes[0] if len(scopes) == 1 else scopes
         if persona_id is not None:
             metadata_filters["persona_id"] = persona_id
 
@@ -449,47 +463,56 @@ class VectorRetriever:
         if len(unique_ids) < 2:
             return []
 
-        index = self.faiss_db.embedding_storage.index
-        if index is None:
-            return []
+        storage = self.faiss_db.embedding_storage
+        persister = get_async_persister(storage)
+        # 与增删/换索引互斥：分析期间必须持有读者锁，否则可能读到半更新的索引。
+        lock = (
+            persister.read_index()
+            if persister is not None
+            else contextlib.nullcontext(storage.index)
+        )
 
-        vectors: list[np.ndarray] = []
-        valid_ids: list[int] = []
-        for doc_id in unique_ids:
-            try:
-                vectors.append(index.reconstruct(doc_id))
-                valid_ids.append(doc_id)
-            except Exception:
-                # 向量缺失（如从未写入或已删除）的文档跳过，不参与语义聚类
-                continue
+        async with lock as index:
+            if index is None:
+                return []
 
-        if len(valid_ids) < 2:
-            return []
+            vectors: list[np.ndarray] = []
+            valid_ids: list[int] = []
+            for doc_id in unique_ids:
+                try:
+                    vectors.append(index.reconstruct(doc_id))
+                    valid_ids.append(doc_id)
+                except Exception:
+                    # 向量缺失（如从未写入或已删除）的文档跳过，不参与语义聚类
+                    continue
 
-        pairs: list[tuple[int, int, float]] = []
-        seen: set[tuple[int, int]] = set()
-        valid_id_set = set(valid_ids)
+            if len(valid_ids) < 2:
+                return []
 
-        for start in range(0, len(valid_ids), batch_size):
-            chunk_ids = valid_ids[start : start + batch_size]
-            matrix = np.stack(vectors[start : start + batch_size]).astype("float32")
-            try:
-                scores, indices = index.search(matrix, k + 1)
-            except Exception as e:
-                _logger.warning(f"[VectorRetriever] 批量向量检索失败: {e}")
-                continue
-            similarities = 1.0 - scores / 2.0
-            for i, doc_id in enumerate(chunk_ids):
-                for j in range(indices.shape[1]):
-                    nb_id = int(indices[i][j])
-                    if nb_id < 0 or nb_id == doc_id or nb_id not in valid_id_set:
-                        continue
-                    sim = float(similarities[i][j])
-                    if sim < threshold:
-                        continue
-                    a, b = (doc_id, nb_id) if doc_id < nb_id else (nb_id, doc_id)
-                    if (a, b) not in seen:
-                        seen.add((a, b))
-                        pairs.append((a, b, sim))
+            pairs: list[tuple[int, int, float]] = []
+            seen: set[tuple[int, int]] = set()
+            valid_id_set = set(valid_ids)
 
-        return pairs
+            for start in range(0, len(valid_ids), batch_size):
+                chunk_ids = valid_ids[start : start + batch_size]
+                matrix = np.stack(vectors[start : start + batch_size]).astype("float32")
+                try:
+                    scores, indices = index.search(matrix, k + 1)
+                except Exception as e:
+                    _logger.warning(f"[VectorRetriever] 批量向量检索失败: {e}")
+                    continue
+                similarities = 1.0 - scores / 2.0
+                for i, doc_id in enumerate(chunk_ids):
+                    for j in range(indices.shape[1]):
+                        nb_id = int(indices[i][j])
+                        if nb_id < 0 or nb_id == doc_id or nb_id not in valid_id_set:
+                            continue
+                        sim = float(similarities[i][j])
+                        if sim < threshold:
+                            continue
+                        a, b = (doc_id, nb_id) if doc_id < nb_id else (nb_id, doc_id)
+                        if (a, b) not in seen:
+                            seen.add((a, b))
+                            pairs.append((a, b, sim))
+
+            return pairs

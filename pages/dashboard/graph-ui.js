@@ -14,11 +14,16 @@
     isLoading: false,
     hasLoadedOverview: false,
     isGraphReady: false,
+    is2DReady: false,
     overviewMode: null, /* "limited" | "full" | null */
     viewMode: "2d",
     renderer: null,
     graph3D: null,
     pageActive: true,
+    /* 在途图谱请求的代际号：新请求/取消会自增，旧响应据此丢弃。 */
+    loadGeneration: 0,
+    activeGraphLoad: null, /* { generation, fullGraph, timer, previousMessage } | null */
+    confirmOpen: false,
   };
 
   const EXPANDED_GRAPH_LIMITS = {
@@ -41,10 +46,7 @@
     };
   }
 
-  const NODE_TYPE_COLORS = {
-    topic: "#78a94b", person: "#2a9e96", fact: "#c58c2a",
-    summary: "#df6d62", other: "#74868a",
-  };
+  const NODE_TYPES = window.GraphShared.NODE_TYPES;
 
   /* ================================================================
      Bridge helpers
@@ -75,21 +77,47 @@
         var qs = path.substring(qi + 1);
         var params = {};
         new URLSearchParams(qs).forEach(function(v, k) { params[k] = v; });
-        return unwrapGraphData(await bridge.apiGet(buildEndpoint(base), params));
+        return window.lmUnwrapResponse(await bridge.apiGet(buildEndpoint(base), params));
       }
-      return unwrapGraphData(await bridge.apiGet(buildEndpoint(path), {}));
+      return window.lmUnwrapResponse(await bridge.apiGet(buildEndpoint(path), {}));
     }
-    return unwrapGraphData(await bridge.apiPost(buildEndpoint(path), options.body || {}));
+    return window.lmUnwrapResponse(await bridge.apiPost(buildEndpoint(path), options.body || {}));
   }
 
-  function unwrapGraphData(response) {
-    if (response && response.status === "ok" && Object.prototype.hasOwnProperty.call(response, "data")) {
-      return response.data || {};
+  /* ================================================================
+     2D renderer lifecycle
+     ================================================================ */
+
+  /* 2D 布局在独立 Worker 中运行，热路径（画布、邻接索引、布局缓存）都按
+     大图规模分配。离开图谱页或切到 3D 时销毁，回来时按需重建。 */
+  function initGraph2D() {
+    if (!window.Graph2D || typeof window.Graph2D.init !== "function") {
+      setCanvasMessage(window.t("graph2d.moduleFail"), "error");
+      return false;
     }
-    if (response && response.status === "error") {
-      throw new Error(response.message || window.t("misc.requestFailed"));
-    }
-    return response || {};
+    state.renderer = window.Graph2D;
+    window.Graph2D.init(dom.view2D, {
+      onNodeClick: function(nodeId) {
+        selectNode(nodeId, false);
+      },
+      onNodeDblClick: function(nodeId) {
+        selectNode(nodeId, true);
+      },
+      onBackgroundClick: function() {
+        clearSelection();
+      },
+    });
+    state.is2DReady = true;
+    state.isGraphReady = true;
+    return true;
+  }
+
+  function releaseGraph2D() {
+    if (!window.Graph2D || !state.is2DReady) return;
+    if (typeof window.Graph2D.destroy === "function") window.Graph2D.destroy();
+    if (state.renderer === window.Graph2D) state.renderer = null;
+    state.is2DReady = false;
+    state.isGraphReady = false;
   }
 
   /* ================================================================
@@ -102,6 +130,7 @@
     dom.searchButton = document.getElementById("graph-search-btn");
     dom.overviewButton = document.getElementById("graph-overview-btn");
     dom.legend = document.getElementById("graph-legend");
+    dom.queryResult = document.getElementById("graph-query-result");
     dom.canvas = document.getElementById("graph-canvas");
     dom.canvasState = document.getElementById("graph-canvas-state");
     dom.viewMode = document.getElementById("graph-view-mode");
@@ -112,6 +141,10 @@
     dom.page = document.getElementById("page-graph");
     dom.view2D = document.getElementById("graph-view-2d");
     dom.view3D = document.getElementById("graph-view-3d");
+    dom.nodeListButton = document.getElementById("graph-node-list-btn");
+    dom.nodeListDialog = document.getElementById("graph-node-list-dialog");
+    dom.nodeList = document.getElementById("graph-node-list");
+    dom.nodeListClose = document.getElementById("graph-node-list-close");
 
     if (!dom.canvas) return;
 
@@ -127,6 +160,9 @@
       if (state.isGraphReady) state.renderer.resetView();
       if (window.lmClosePeek) window.lmClosePeek();
     });
+    if (dom.nodeListButton) dom.nodeListButton.addEventListener("click", openNodeList);
+    if (dom.nodeListClose) dom.nodeListClose.addEventListener("click", closeNodeList);
+    if (dom.nodeList) dom.nodeList.addEventListener("click", onNodeListClick);
     dom.relationsButton.addEventListener("click", function() {
       state.graph3D.setShowAllRelations(!state.graph3D.showAllRelations);
       dom.relationsButton.setAttribute("aria-pressed", String(state.graph3D.showAllRelations));
@@ -149,31 +185,18 @@
       }
     });
 
-    /* Init Graph2D */
-    if (window.Graph2D && typeof window.Graph2D.init === "function") {
-      state.renderer = window.Graph2D;
-      window.Graph2D.init(dom.view2D, {
-        onNodeClick: function(nodeId) {
-          selectNode(nodeId, false);
-        },
-        onNodeDblClick: function(nodeId) {
-          selectNode(nodeId, true);
-        },
-        onBackgroundClick: function() {
-          clearSelection();
-        },
-      });
-      state.isGraphReady = true;
-    } else {
-      setCanvasMessage(window.t("graph2d.moduleFail"), false);
-    }
+    initGraph2D();
 
     window.addEventListener("languagechange", function() {
       initLabels();
       setOverviewButtonLabel();
       setInteractionHint();
       setMotionButtonLabel();
-      if (state.payload) renderLegend(state.payload);
+      if (state.payload) {
+        renderLegend(state.payload);
+        updateCanvasA11yFromPayload();
+        if (dom.nodeListDialog && dom.nodeListDialog.open) renderNodeList();
+      }
     });
 
     /* app.js starts loading after the host Bridge reports ready. */
@@ -205,7 +228,7 @@
   function createGraph3D() {
     if (state.graph3D) return Promise.resolve(state.graph3D);
     if (graph3DLoading) return graph3DLoading;
-    graph3DLoading = import(document.getElementById("graph-3d-module").href)
+    graph3DLoading = import(new URL(dom.view3D.dataset.module, document.baseURI).href)
       .then(({ default: Graph3D }) => {
         if (!state.pageActive || dom.viewMode.value !== "3d") return null;
         const instance = new Graph3D();
@@ -213,14 +236,14 @@
         instance.init(dom.view3D, {
           onNodeClick: nodeId => selectNode(nodeId, false),
           onBackgroundClick: clearSelection,
-          onError: message => setCanvasMessage(message || window.t("graph.renderFail"), false),
+          onError: message => setCanvasMessage(message || window.t("graph.renderFail"), "error"),
         });
         state.graph3D = instance;
         return instance;
       })
       .catch(error => {
         dom.view3D.hidden = true;
-        setCanvasMessage(error.message || window.t("graph.renderFail"), false);
+        setCanvasMessage(error.message || window.t("graph.renderFail"), "error");
         return null;
       })
       .finally(() => {
@@ -231,7 +254,9 @@
 
   function releaseGraph3D() {
     if (!state.graph3D) return;
-    if (state.renderer === state.graph3D) state.renderer = window.Graph2D;
+    if (state.renderer === state.graph3D) {
+      state.renderer = state.is2DReady ? window.Graph2D : null;
+    }
     state.graph3D.destroy();
     state.graph3D = null;
     dom.view3D.hidden = true;
@@ -246,14 +271,16 @@
         return;
       }
     }
+    if (mode === "3d") releaseGraph2D();
     state.viewMode = mode;
+    if (mode === "2d" && !state.is2DReady) initGraph2D();
     state.renderer = mode === "3d" ? state.graph3D : window.Graph2D;
     dom.page.classList.toggle("graph-space-mode", mode === "3d");
     dom.view2D.hidden = mode !== "2d";
     dom.view3D.hidden = mode !== "3d";
     dom.spaceControls.hidden = mode !== "3d";
     setMotionButtonLabel();
-    state.isGraphReady = true;
+    state.isGraphReady = mode === "3d" ? Boolean(state.graph3D) : state.is2DReady;
     window.lmSetGraphActive(state.pageActive);
     setInteractionHint();
     if (state.payload) { renderScene(); renderLegend(state.payload); }
@@ -261,16 +288,19 @@
 
   window.lmSetGraphActive = function(active) {
     state.pageActive = active;
-    if (window.Graph2D) window.Graph2D.setActive(active && state.viewMode === "2d");
     if (!active) {
       releaseGraph3D();
+      releaseGraph2D();
       document.documentElement.dataset.graphView = "";
       return;
     }
     if (state.viewMode !== "3d") {
+      if (!state.is2DReady && initGraph2D() && state.payload) renderScene();
+      if (window.Graph2D && state.is2DReady && state.isGraphReady) window.Graph2D.setActive(true);
       document.documentElement.dataset.graphView = state.viewMode;
       return;
     }
+    if (window.Graph2D && state.isGraphReady) window.Graph2D.setActive(false);
     if (state.graph3D) {
       state.renderer = state.graph3D;
       state.graph3D.setActive(true);
@@ -317,25 +347,140 @@
     return target;
   }
 
+  /* 宿主插件 iframe 的 sandbox 不含 allow-modals，window.confirm 会被静默拦截，
+     因此这里用页面内自绘确认层（复用 .confirm-dialog 样式，不新增 CSS 文件）。 */
+  function confirmFullGraphLoad() {
+    if (state.confirmOpen) return Promise.resolve(false);
+    state.confirmOpen = true;
+    var previousFocus = document.activeElement || null;
+
+    return new Promise(function(resolve) {
+      var overlay = document.createElement("div");
+      overlay.id = "graph-full-confirm";
+      overlay.className = "graph-full-confirm";
+      overlay.style.position = "fixed";
+      overlay.style.inset = "0";
+      overlay.style.background = "rgba(0, 0, 0, 0.45)";
+      overlay.style.zIndex = "9999";
+      overlay.style.display = "flex";
+      overlay.style.alignItems = "center";
+      overlay.style.justifyContent = "center";
+
+      var dialog = document.createElement("div");
+      dialog.className = "confirm-dialog";
+      dialog.setAttribute("role", "dialog");
+      dialog.setAttribute("aria-modal", "true");
+      dialog.setAttribute("aria-label", window.t("graph.fullGraphConfirm"));
+      dialog.style.background = "var(--bg-card, #fff)";
+      dialog.style.border = "1px solid var(--border-normal, #ccc)";
+      dialog.style.borderRadius = "8px";
+      dialog.style.boxShadow = "0 18px 48px rgba(0, 0, 0, 0.28)";
+      dialog.style.padding = "20px";
+      dialog.style.width = "min(420px, calc(100vw - 32px))";
+
+      var message = document.createElement("div");
+      message.className = "confirm-dialog-message";
+      message.textContent = window.t("graph.fullGraphConfirm");
+
+      var actions = document.createElement("div");
+      actions.className = "confirm-dialog-actions";
+
+      var cancelBtn = document.createElement("button");
+      cancelBtn.type = "button";
+      cancelBtn.id = "graph-full-confirm-cancel";
+      cancelBtn.className = "btn btn-secondary";
+      cancelBtn.textContent = window.t("common.cancel");
+
+      var okBtn = document.createElement("button");
+      okBtn.type = "button";
+      okBtn.id = "graph-full-confirm-ok";
+      okBtn.className = "btn btn-primary";
+      okBtn.textContent = window.t("common.confirm");
+
+      function close(result) {
+        if (!state.confirmOpen) return;
+        state.confirmOpen = false;
+        document.removeEventListener("keydown", onKeydown, true);
+        if (overlay.parentElement) overlay.parentElement.removeChild(overlay);
+        else if (typeof overlay.remove === "function") overlay.remove();
+        resolve(result);
+        if (previousFocus && typeof previousFocus.focus === "function") previousFocus.focus();
+      }
+
+      function onKeydown(event) {
+        if (!event || event.key !== "Escape") return;
+        if (typeof event.preventDefault === "function") event.preventDefault();
+        if (typeof event.stopImmediatePropagation === "function") event.stopImmediatePropagation();
+        close(false);
+      }
+
+      cancelBtn.addEventListener("click", function() { close(false); });
+      okBtn.addEventListener("click", function() { close(true); });
+      overlay.addEventListener("click", function(event) {
+        if (event && event.target === overlay) close(false);
+      });
+      document.addEventListener("keydown", onKeydown, true);
+
+      actions.appendChild(cancelBtn);
+      actions.appendChild(okBtn);
+      dialog.appendChild(message);
+      dialog.appendChild(actions);
+      overlay.appendChild(dialog);
+      (document.body || document.documentElement).appendChild(overlay);
+      if (typeof cancelBtn.focus === "function") cancelBtn.focus();
+    });
+  }
+
   async function fetchOverview(fullGraph) {
+    var isFull = fullGraph === true;
+    /* 全量图可能耗时数十秒、响应可达数十 MB：先让用户明确确认。 */
+    if (isFull && !(await confirmFullGraphLoad())) return;
+
+    /* 新请求取代旧请求时，旧请求的进度定时器立即作废。 */
+    if (state.activeGraphLoad) clearGraphLoadTimer(state.activeGraphLoad);
+    var generation = ++state.loadGeneration;
+    var load = { generation: generation, fullGraph: isFull, timer: null };
+    var startedAt = Date.now();
+    const previousStatus = dom.canvasState.getAttribute("data-state");
+    load.previousMessage = previousStatus === "loading" || previousStatus === "layout" ? "" : dom.canvasState.textContent;
+    load.previousStatus = previousStatus;
+    state.activeGraphLoad = load;
     setLoading(true);
-    setCanvasMessage(window.t("graph.loadingOverview"), true);
+    if (isFull) {
+      setCanvasMessage(window.t("graph.loadingFullGraph", 0), "loading");
+      load.timer = setInterval(function() {
+        if (state.activeGraphLoad !== load) return;
+        var seconds = Math.floor((Date.now() - startedAt) / 1000);
+        setCanvasMessage(window.t("graph.loadingFullGraph", seconds), "loading");
+      }, 500);
+    } else {
+      setCanvasMessage(window.t("graph.loadingOverview"), "loading");
+    }
+
     try {
       var filters = getFilters();
       var params = new URLSearchParams();
-      if (fullGraph) params.set("full_graph", "true");
+      if (isFull) params.set("full_graph", "true");
       if (filters.session_id) params.set("session_id", filters.session_id);
       var qs = params.toString();
       var payload = await requestGraph("/graph/overview" + (qs ? "?" + qs : ""));
+      /* 已被取消或被更新的请求取代：丢弃结果，不渲染。 */
+      if (generation !== state.loadGeneration) return;
       state.hasLoadedOverview = true;
-      state.overviewMode = fullGraph ? "full" : "limited";
+      state.overviewMode = isFull ? "full" : "limited";
       setOverviewButtonLabel();
       renderPayload(payload, true);
       // 统计卡片由 renderPayload 内部统一刷新，此处不再重复请求
     } catch (e) {
-      setCanvasMessage(e.message || window.t("graph.errorFetch"), false);
+      if (generation !== state.loadGeneration) return;
+      setCanvasMessage(e.message || window.t("graph.errorFetch"), "error");
     } finally {
-      setLoading(false);
+      /* 定时器属于本次请求：即使已被新请求取代，也必须自行清理。 */
+      clearGraphLoadTimer(load);
+      if (state.activeGraphLoad === load) {
+        state.activeGraphLoad = null;
+        setLoading(false);
+      }
     }
   }
 
@@ -352,13 +497,37 @@
     dom.overviewButton.setAttribute("data-i18n-aria", key);
   }
 
+  function clearGraphLoadTimer(load) {
+    if (load && load.timer !== null) {
+      clearInterval(load.timer);
+      load.timer = null;
+    }
+  }
+
+  /* 取消在途的全量图谱请求：代际号自增使返回结果被丢弃，恢复按钮并清掉
+     加载文案；已渲染的图与当前选择保持不动，可再次发起请求。 */
+  window.lmCancelGraphLoad = function() {
+    var load = state.activeGraphLoad;
+    if (!load || !load.fullGraph) return false;
+    state.loadGeneration++;
+    clearGraphLoadTimer(load);
+    state.activeGraphLoad = null;
+    setLoading(false);
+    setCanvasMessage(load.previousMessage, load.previousStatus);
+    setOverviewButtonLabel();
+    if (typeof window.lmShowToast === "function") {
+      window.lmShowToast(window.t("graph.cancelled"), false);
+    }
+    return true;
+  };
+
   async function runQuery() {
     if (state.isLoading) return; // 回车触发绕过按钮 disabled，显式防并发
     var query = dom.queryInput.value.trim();
     if (!query) { fetchOverview(false); return; }
 
     setLoading(true);
-    setCanvasMessage(window.t("graph.loadingQuery", query), true);
+    setCanvasMessage(window.t("graph.loadingQuery", query), "loading");
     try {
       var filters = getFilters();
       var body = addExpandedLimits({ query: query });
@@ -369,7 +538,7 @@
       });
       renderPayload(payload, true);
     } catch (e) {
-      setCanvasMessage(e.message || window.t("graph.queryFail"), false);
+      setCanvasMessage(e.message || window.t("graph.queryFail"), "error");
     } finally {
       setLoading(false);
     }
@@ -384,7 +553,7 @@
     if (id === null || state.isLoading) return;
 
     setLoading(true);
-    setCanvasMessage(window.t("graph.loadingFocus", id), true);
+    setCanvasMessage(window.t("graph.loadingFocus", id), "loading");
     try {
       var filters = getFilters();
       var body = addExpandedLimits({ memory_id: id });
@@ -397,7 +566,7 @@
       state.selectedMemoryId = id;
       renderPayload(payload, true);
     } catch (e) {
-      setCanvasMessage(e.message || window.t("graph.focusFail"), false);
+      setCanvasMessage(e.message || window.t("graph.focusFail"), "error");
     } finally {
       setLoading(false);
     }
@@ -408,6 +577,93 @@
     if (window.lmSwitchPage) await window.lmSwitchPage("graph");
     return focusMemoryById(memoryId);
   };
+
+  /* ================================================================
+     Accessibility helpers — 2D canvas fallback + node list dialog
+     ================================================================ */
+
+  var ESCAPE_MAP = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
+  function escapeNodeText(value) {
+    return String(value == null ? "" : value).replace(/[&<>"']/g, function(ch) {
+      return ESCAPE_MAP[ch];
+    });
+  }
+
+  function payloadCounts() {
+    var snapshot = (state.payload && state.payload.snapshot) || {};
+    return [(snapshot.nodes || []).length, (snapshot.edges || []).length];
+  }
+
+  function updateCanvasA11y(nodeCount, edgeCount) {
+    var canvas = dom.view2D && dom.view2D.querySelector ? dom.view2D.querySelector("canvas") : null;
+    if (!canvas || typeof canvas.setAttribute !== "function") return;
+    canvas.setAttribute("role", "img");
+    canvas.setAttribute("aria-label", window.t("graph.canvasAria", nodeCount, edgeCount));
+  }
+
+  function updateCanvasA11yFromPayload() {
+    var counts = payloadCounts();
+    updateCanvasA11y(counts[0], counts[1]);
+  }
+
+  function renderNodeList() {
+    if (!dom.nodeList) return;
+    var snapshot = (state.payload && state.payload.snapshot) || {};
+    var nodes = Array.isArray(snapshot.nodes) ? snapshot.nodes.slice(0, 300) : [];
+    if (!nodes.length) {
+      dom.nodeList.innerHTML =
+        '<li class="table-empty">' + escapeNodeText(window.t("graph.nodeListEmpty")) + "</li>";
+      return;
+    }
+    dom.nodeList.innerHTML = nodes
+      .map(function(node) {
+        var label = node.label || node.canonical_value || node.key || "#" + node.id;
+        return (
+          '<li><button type="button" class="graph-node-list-item" data-node-id="' +
+          escapeNodeText(node.id) +
+          '"><span class="graph-node-list-label">' +
+          escapeNodeText(label) +
+          '</span><span class="graph-node-list-type">' +
+          escapeNodeText(typeLabel(node.type)) +
+          "</span></button></li>"
+        );
+      })
+      .join("");
+  }
+
+  function openNodeList() {
+    renderNodeList();
+    if (
+      dom.nodeListDialog &&
+      typeof dom.nodeListDialog.showModal === "function" &&
+      !dom.nodeListDialog.open
+    ) {
+      dom.nodeListDialog.showModal();
+    }
+  }
+
+  function closeNodeList() {
+    if (
+      dom.nodeListDialog &&
+      typeof dom.nodeListDialog.close === "function" &&
+      dom.nodeListDialog.open
+    ) {
+      dom.nodeListDialog.close();
+    }
+    if (dom.nodeListButton && typeof dom.nodeListButton.focus === "function") {
+      dom.nodeListButton.focus({ preventScroll: true });
+    }
+  }
+
+  function onNodeListClick(event) {
+    var target = event && event.target && event.target.closest
+      ? event.target.closest("[data-node-id]")
+      : null;
+    if (!target) return;
+    var nodeId = numericId(target.getAttribute("data-node-id"));
+    closeNodeList();
+    if (nodeId !== null) selectNode(nodeId, true);
+  }
 
   /* ================================================================
      Render Pipeline
@@ -428,10 +684,11 @@
     }
     state.payload = payload;
     state.graphIndex = buildGraphIndex(snapshot);
+    updateCanvasA11y((snapshot.nodes || []).length, (snapshot.edges || []).length);
 
     if (!payload.enabled) {
       state.selectedNodeId = state.selectedMemoryId = null;
-      setCanvasMessage(window.t("graph.disabledMsg"), false);
+      setCanvasMessage(window.t("graph.disabledMsg"));
       renderLegend(payload);
       if (state.isGraphReady) renderScene();
       return;
@@ -457,20 +714,19 @@
 
     renderLegend(payload);
     if (state.isGraphReady) renderScene();
-
-    if (window.lmFetchGraphStats) window.lmFetchGraphStats();
   }
 
   function renderScene() {
     const renderer = state.renderer;
     const payload = state.payload;
+    if (!renderer || !payload) return;
     /* 回到图谱页时 3D 可能仍在按需重建：此时不加载数据，
        等实例就绪后由 lmSetGraphActive 重新调用 renderScene。 */
     if (state.viewMode === "3d" && !state.graph3D) return;
     if (!payload.enabled) {
       renderer.selection = null;
       renderer.loadData({ snapshot: { nodes: [], edges: [] } });
-      setCanvasMessage(window.t("graph.disabledMsg"), false);
+      setCanvasMessage(window.t("graph.disabledMsg"));
       return;
     }
     const hasGraphData = state.graphIndex.nodeMap.size > 0;
@@ -478,11 +734,11 @@
       : state.selectedMemoryId !== null ? { type: "memory", id: state.selectedMemoryId } : null;
     state.renderer.selection = selection;
     if (state.renderer.renderer && state.viewMode === "2d") state.renderer.renderer._selection = selection;
-    setCanvasMessage(window.t(hasGraphData ? "graph.layouting" : "graph.canvasEmpty"), hasGraphData);
+    setCanvasMessage(window.t(hasGraphData ? "graph.layouting" : "graph.canvasEmpty"), hasGraphData ? "layout" : "");
     state.renderer.loadData(state.payload, {
       onLayoutDone: function() {
         if (state.renderer !== renderer || state.payload !== payload) return;
-        if (state.graphIndex.nodeMap.size) setCanvasMessage("", false);
+        if (dom.canvasState.getAttribute("data-state") === "layout") setCanvasMessage("");
       },
     });
     if (selection?.type === "node") state.renderer.selectNode(selection.id);
@@ -608,23 +864,19 @@
     if (!dom.legend) return;
     var summary = payload.summary || {};
     var nodeTypes = summary.node_type_breakdown || {};
-    var colors = state.viewMode === "3d" ? state.graph3D.colors : NODE_TYPE_COLORS;
+    const { nodes = [], edges = [] } = payload.snapshot || {};
+    const result = payload.enabled && payload.mode === "query" && nodes.length
+      ? window.t("graph.queryResult", nodes.length, edges.length) : "";
+    if (dom.queryResult.textContent !== result) dom.queryResult.textContent = result;
 
     /* 图例只解释画布上真实存在的编码：节点颜色。关系 chip 既没有色点，
        也与画布上的边色无关，还用的是未本地化的枚举名。 */
     var chips = Object.entries(nodeTypes).sort(function(a, b) { return b[1] - a[1]; })
       .map(function(e) {
-        return '<span class="legend-chip"><span class="dot" style="background:' +
-          (colors[e[0]] || colors.other) + '"></span>' +
+        var type = NODE_TYPES.includes(e[0]) ? e[0] : "other";
+        return '<span class="legend-chip"><span class="dot" style="background:var(--node-' + type + ')"></span>' +
           typeLabel(e[0]) + ' &middot; ' + e[1] + '</span>';
       });
-
-    /* 服务端对全量图有硬上限；被截断时明说，否则与左上角总数互相矛盾。 */
-    var visibleNodes = Number(summary.visible_node_count || 0);
-    var totalNodes = Number(summary.graph_node_count || 0);
-    if (totalNodes > visibleNodes && visibleNodes > 0) {
-      chips.push('<span class="legend-chip">' + window.t("graph.visibleNodes", visibleNodes, totalNodes) + '</span>');
-    }
 
     dom.legend.innerHTML = chips.join("") ||
       '<span class="legend-chip">' + window.t("graph.legendEmpty") + '</span>';
@@ -691,10 +943,13 @@
   /* ================================================================
      Canvas Messages
      ================================================================ */
-  function setCanvasMessage(msg, loading) {
+  function setCanvasMessage(msg, status = "") {
     if (!dom.canvasState) return;
-    dom.canvasState.textContent = msg || "";
+    if (dom.canvasState.textContent !== msg) dom.canvasState.textContent = msg;
+    if (!msg) status = "";
+    dom.canvasState.setAttribute("data-state", status);
     dom.canvasState.style.display = msg ? "block" : "none";
+    dom.canvas.setAttribute("aria-busy", String(status === "loading" || status === "layout"));
   }
 
   /* ================================================================

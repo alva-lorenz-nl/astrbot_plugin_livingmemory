@@ -6,7 +6,12 @@ from contextvars import ContextVar
 from types import SimpleNamespace
 
 from ..faiss_async_persist import get_async_persister
-from ..memory_scope import adapter_sql, adapter_visible, current_adapter_access
+from ..memory_scope import (
+    adapter_sql,
+    adapter_visible,
+    current_adapter_access,
+    normalize_memory_scopes,
+)
 
 query_embeddings = ContextVar("livingmemory_query_embeddings", default=None)
 
@@ -16,7 +21,10 @@ async def retrieve_documents(
 ):
     """Apply request ownership in SQL before limiting host document reads."""
     predicate, adapters = adapter_sql("metadata")
-    if not adapters:
+    multi_value_filters = any(
+        isinstance(value, (list, tuple, set)) for value in metadata_filters.values()
+    )
+    if not ids_only and not adapters and not multi_value_filters:
         return await db.document_storage.get_documents(
             metadata_filters=metadata_filters, ids=ids, limit=limit, offset=offset
         )
@@ -27,8 +35,17 @@ async def retrieve_documents(
         predicate = predicate.replace("?", f":adapter_{i}", 1)
     conditions = [predicate]
     for key, value in metadata_filters.items():
-        conditions.append(f"json_extract(metadata, '$.{key}') = :filter_{key}")
-        values[f"filter_{key}"] = value
+        scopes = normalize_memory_scopes(value)
+        if scopes is not None:
+            placeholders = ",".join(
+                f":filter_{key}_{index}" for index in range(len(scopes))
+            )
+            conditions.append(f"json_extract(metadata, '$.{key}') IN ({placeholders})")
+            for index, scope in enumerate(scopes):
+                values[f"filter_{key}_{index}"] = scope
+        else:
+            conditions.append(f"json_extract(metadata, '$.{key}') = :filter_{key}")
+            values[f"filter_{key}"] = value
     if ids is not None:
         if not ids:
             return []
@@ -59,7 +76,8 @@ async def retrieve_vectors(db, query, k, filters, *, source_key="id"):
         source_key: Document field used to deduplicate graph source memories.
 
     Returns:
-        Ranked vector hits. Candidate expansion is capped at 8192 vectors.
+        Ranked vector hits. 作用域候选不超过 8192 条时用 IDSelectorBatch 一次
+        搜索；超过时才回退到扩窗重查，避免大作用域构造过大的选择器。
     """
     if k <= 0:
         return []
@@ -77,20 +95,30 @@ async def retrieve_vectors(db, query, k, filters, *, source_key="id"):
         import numpy as np
 
         access = current_adapter_access.get()
-        if access is not None and access.adapter_ids is not None:
+        adapter_restricted = access is not None and access.adapter_ids is not None
+        if filters or adapter_restricted:
             import faiss
 
+            # 先把作用域内的文档 id 取出来，用 IDSelectorBatch 一次过滤。
+            # 否则 ANN 只按相似度取候选，再在 Python 里丢弃其他会话的命中，
+            # 稀疏作用域要翻倍重查 6-7 轮，每轮取回整行 text/metadata。
             candidates = await retrieve_documents(
-                db, filters, limit=None, ids_only=True
+                db,
+                filters,
+                limit=None if adapter_restricted else cap + 1,
+                ids_only=True,
             )
             if not candidates:
                 return []
-            allowed_ids = np.asarray([row["id"] for row in candidates], dtype=np.int64)
-            search_options["params"] = faiss.SearchParameters(
-                sel=faiss.IDSelectorBatch(allowed_ids)
+            allowed_ids = np.asarray(
+                [int(row["id"]) for row in candidates], dtype=np.int64
             )
-            cap = min(len(candidates), cap)
-            fetch_k = min(fetch_k, cap)
+            if adapter_restricted or len(allowed_ids) <= cap:
+                search_options["params"] = faiss.SearchParameters(
+                    sel=faiss.IDSelectorBatch(allowed_ids)
+                )
+                cap = min(len(allowed_ids), cap)
+                fetch_k = min(fetch_k, cap)
 
         provider = db.embedding_provider
         cache = query_embeddings.get()
@@ -104,6 +132,11 @@ async def retrieve_vectors(db, query, k, filters, *, source_key="id"):
         vector = np.asarray(embedding, dtype=np.float32).ravel()
         if vector.size != storage.dimension or not np.isfinite(vector).all():
             raise ValueError("Invalid query embedding")
+
+    # 作用域过滤值预先归一化，避免在候选循环里对每个命中重复解析。
+    python_filters = [
+        (key, normalize_memory_scopes(value), value) for key, value in filters.items()
+    ]
 
     # 候选窗口翻倍重查时复用已取回的文档，避免每轮重复 SQL + JSON 解析；
     # 每轮只需查询新增的 kNN id。
@@ -145,12 +178,17 @@ async def retrieve_vectors(db, query, k, filters, *, source_key="id"):
             exhausted = len(ids) < fetch_k
         else:
             # Older host adapters expose only retrieve; preserve their public API.
+            host_filters = {
+                key: value
+                for key, value in filters.items()
+                if not isinstance(value, (list, tuple, set))
+            }
             raw = await db.retrieve(
                 query=query,
                 k=fetch_k,
                 fetch_k=fetch_k,
                 rerank=False,
-                metadata_filters=filters or None,
+                metadata_filters=host_filters or None,
             )
             exhausted = not filters and len(raw) < fetch_k
 
@@ -169,7 +207,14 @@ async def retrieve_vectors(db, query, k, filters, *, source_key="id"):
                 continue
             if not adapter_visible(metadata):
                 continue
-            if any(metadata.get(key) != value for key, value in filters.items()):
+            if any(
+                (
+                    metadata.get(key) not in scopes
+                    if scopes is not None
+                    else metadata.get(key) != raw_value
+                )
+                for key, scopes, raw_value in python_filters
+            ):
                 continue
             identity = (
                 hit.data.get("id") if source_key == "id" else metadata.get(source_key)

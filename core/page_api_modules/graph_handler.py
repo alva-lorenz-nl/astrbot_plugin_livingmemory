@@ -5,13 +5,27 @@
 import asyncio
 from typing import TYPE_CHECKING, Any
 
-import networkx as nx
 from quart import request
 
 from astrbot.api import logger
 
+from ..retrieval.recall_trace import trace_request_context
+
 if TYPE_CHECKING:
     from .utils import PageApiUtils
+
+# networkx 只服务于「打开图谱页」时的社区分组，顶层 import 会在插件加载时
+# 多花约 0.24s / 13MB（仅 WebUI 需要）。改为首次分配社区时再导入并缓存。
+_nx: Any = None
+
+
+def _networkx() -> Any:
+    global _nx
+    if _nx is None:
+        import networkx
+
+        _nx = networkx
+    return _nx
 
 
 class GraphHandler:
@@ -33,6 +47,7 @@ class GraphHandler:
         Args:
             snapshot: Fresh graph snapshot whose node dictionaries are updated.
         """
+        nx = _networkx()
         graph = nx.Graph()
         graph.add_nodes_from(sorted(node["id"] for node in snapshot["nodes"]))
         for edge in snapshot["edges"]:
@@ -284,12 +299,17 @@ class GraphHandler:
                 )
 
             # 模式 3: 基于查询文本的语义检索
-            search_results = await memory_engine.search_memories(
-                query=query_text,
-                k=limit_memories,
+            with trace_request_context(
                 session_id=session_id,
+                scope=session_id,
                 persona_id=persona_id,
-            )
+            ):
+                search_results = await memory_engine.search_memories(
+                    query=query_text,
+                    k=limit_memories,
+                    session_id=session_id,
+                    persona_id=persona_id,
+                )
             retrieval_items = []
             matched_memory_ids: list[int] = []
             seen_memory_ids: set[int] = set()

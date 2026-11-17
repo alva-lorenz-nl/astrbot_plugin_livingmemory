@@ -19,6 +19,14 @@ LivingMemory is not just a chat log. It transforms conversations into searchable
     <h3>Memory atomization</h3>
     <p>Important facts become independent atoms with type, TTL, importance, access count, and decay state.</p>
   </div>
+  <div>
+    <h3>User profiles</h3>
+    <p>Long-term memories consolidate into structured profiles organised by persona and scope, which can be browsed, edited, compared across versions and reviewed in the dashboard.</p>
+  </div>
+  <div>
+    <h3>Diagnostics</h3>
+    <p>Inspect recall traces, channel memories, external API audit logs and LLM usage in the dashboard to pinpoint retrieval or provider issues.</p>
+  </div>
 </div>
 
 ## Where memories come from
@@ -30,6 +38,7 @@ LivingMemory is not just a chat log. It transforms conversations into searchable
 | Manual administrator summary | `/lmem summarize [message_count]` | Save the current context immediately or re-summarize the latest N messages |
 
 Summarization produces a persona-styled `summary` used for both memory injection and dashboard display (`persona_summary`), while retrieval content is assembled by code from `summary` and `key_facts` so a single compressed summary cannot drain information density. Custom prompts may still emit a factual `canonical_summary` for consumers such as graph extraction. Memories above the source-retention threshold also store their source messages separately in SQLite. Those messages are not indexed for normal recall, but remain available for Dashboard review, re-summarization, and deep source retrieval by the Agent recall tool.
+After a long idle gap, the next conversation turn triggers one catch-up summary immediately instead of waiting for the configured trigger rounds, so a sparse conversation cannot be silently left unsummarized forever.
 
 ## How recall works
 
@@ -76,6 +85,19 @@ The same boundaries apply to both memory writes and recall:
 
 Scope changes affect newly written memories only. Existing data is not migrated automatically.
 
+## Channel memory
+
+Groups can opt into shared channel memory: summaries are stored in the group's channel scope, and questions from any member recall the personal scope and the channel scope together.
+
+| Capability | Behavior |
+| --- | --- |
+| Group-wide writes | Group summaries land in `livingmemory:channel:<platform>:<group id>` instead of being isolated per triggering user |
+| Merged recall | Group recall searches the current scope and the channel scope together, deduplicating and sharing one `top_k` budget |
+| Guaranteed slots | When available, at least one personal and one channel result are kept (`min_user_slots` / `min_channel_slots`, 0-5) |
+| Isolation preserved | Persona, adapter and allowlist filters still apply; private and explicit writes keep their own scopes |
+
+This feature is off by default (`channel_memory.enabled=false`); while off, writes and recall behave exactly like the previous version.
+
 ## Lifecycle behavior
 
 <img class="diagram" src="/images/lifecycle.svg" alt="Memory lifecycle">
@@ -94,14 +116,14 @@ Archived memories do not participate in normal recall. Restoring one from the Da
 
 ## How large index maintenance stays available
 
-After startup, LivingMemory checks document, vector, BM25, and graph indexes in the background instead of blocking plugin readiness when extensive repairs are required:
+After startup, LivingMemory rebuilds indexes in the background only when needed (a changed provider fingerprint or data left by a migration), so extensive repairs never block plugin readiness:
 
 | Mechanism | Purpose |
 | --- | --- |
 | Provider fingerprint | A changed embedding provider or model triggers a full vector generation rebuild, even when dimensions are unchanged |
 | Batching and checkpoints | Read size, embedding batches, concurrency, and delays are bounded; full vector rebuilds can continue from checkpoints |
 | Shadow indexes | BM25, FAISS, and graph data are built in a separate generation and switched only after success; failures leave the live generation intact |
-| Concurrent-write reconciliation | A final consistency pass repairs data written or changed while maintenance was running |
-| Visible status | `/lmem status` reports checking, rebuilding, partial, failed, and cancelled states with progress |
+| Concurrent-write reconciliation | Rebuilds finish in a shadow generation and replay writes made during maintenance before switching |
+| Visible status | `/lmem status` reports rebuilding, partial, failed, and cancelled states with progress |
 
 See [WebUI management](/en/webui) for data operations and [Configuration](/en/configuration) for all related settings.

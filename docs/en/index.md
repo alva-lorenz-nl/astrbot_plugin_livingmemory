@@ -14,7 +14,7 @@ hero:
       text: Quick Start
       link: /en/guide/getting-started
     - theme: alt
-      text: Get 2.9.0
+      text: Get 2.13.0
       link: /en/releases
 features:
   - title: Automatic long-term memory
@@ -26,7 +26,7 @@ features:
   - title: Time-aware lifecycle
     details: Memory atoms have TTL, decay, access reinforcement, and cleanup behavior.
   - title: Four dashboard styles
-    details: Editorial, Studio, Paper and Terminal; light/dark modes, steady graph reading, and clear editing and import workflows.
+    details: macOS 26 Liquid Glass, Studio, Paper and Terminal; light/dark modes, custom accent, wallpaper and CSS, and clear editing and import workflows.
   - title: Data safety
     details: Version backups, pre-migration backups, index rollback, and transactional deletion reduce upgrade risk.
 ---
@@ -43,9 +43,9 @@ flowchart LR
     ENGINE --> API["Dashboard and agent tools"]
 ```
 
-## 2.9.0 is released
+## 2.13.0 is released
 
-2.9.0 adds adapter-instance sharing and legacy ownership migration, with fixes for oversized summaries, history retention and consolidation isolation. Session and persona settings still apply. Back up source conversations before upgrading and review the hard retention cap. See [Releases and Upgrades](/en/releases) for downloads, migration and configuration.
+2.13.0 is a dashboard appearance release: the default look is upgraded to macOS 26 Liquid Glass and the appearance panel now customizes accent color, wallpaper, glass strength, corners, density and font, alongside a style-layer cleanup and several fixes. First-load gzip is 81,597 B, still within budget. No command, configuration or database migration changes. See [Releases and Upgrades](/en/releases) for downloads and upgrade steps.
 
 ## Who is this for?
 

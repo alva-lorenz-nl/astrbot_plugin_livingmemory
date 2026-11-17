@@ -1,15 +1,11 @@
 """Beta 自主回忆工具的共用辅助：访问解析、身份推导、时间解析、状态输出。"""
 
 import json
-from datetime import datetime, time as dt_time
+from datetime import datetime
+from datetime import time as dt_time
 from typing import Any
 
-from ..memory_scope import (
-    is_event_memory_allowed,
-    resolve_event_identity,
-    resolve_memory_scope,
-)
-from ..utils import get_persona_id
+from ..memory_scope import resolve_event_identity, resolve_event_memory_access
 from .memory_evidence_output import fitting_prefix
 
 
@@ -40,7 +36,7 @@ def bounded_status(data: dict[str, Any], max_chars: int = 500) -> str:
 
 async def resolve_tool_access(
     config_manager: Any, plugin_context: Any, wrapper_context: Any
-) -> tuple[Any, str | None, str | None, dict[str, Any] | None]:
+) -> tuple[Any, str | None, str | None, str | None, dict[str, Any] | None]:
     """解析工具调用的访问上下文；不允许时返回错误结构。
 
     Args:
@@ -50,18 +46,14 @@ async def resolve_tool_access(
         wrapper_context: 工具调用层的 ContextWrapper，仅用于取当前事件。
 
     Returns:
-        (event, recall_session_id, recall_persona_id, error)。error 为 None 表示允许。
+        (event, recall_session_id, recall_persona_id, channel_scope, error)。
+        error 为 None 表示允许。
     """
     event = wrapper_context.context.event
-    if not is_event_memory_allowed(config_manager, event):
-        return event, None, None, {"error": "memory access is not allowed"}
-    filtering_config = config_manager.filtering_settings
-    use_persona_filtering = filtering_config.get("use_persona_filtering", True)
-    persona_id = (
-        await get_persona_id(plugin_context, event) if use_persona_filtering else None
-    )
-    recall_session_id = resolve_memory_scope(config_manager, event)
-    return event, recall_session_id, persona_id, None
+    access = await resolve_event_memory_access(config_manager, plugin_context, event)
+    if not access.allowed:
+        return event, None, None, None, {"error": "memory access is not allowed"}
+    return event, access.scope, access.persona_id, access.channel_scope, None
 
 
 def _event_value(event: Any, method_name: str) -> str:

@@ -120,17 +120,74 @@ export function metaItem(label, value, valueIsHtml = false) {
 }
 
 /**
- * 防抖函数
- * @param {Function} fn - 要防抖的函数
- * @param {number} ms - 防抖延迟（毫秒）
- * @returns {Function} 防抖后的函数
+ * 显示 Toast 提示（实际渲染由 dashboard 入口的 window.lmShowToast 完成）
+ * @param {string} message - 提示消息
+ * @param {boolean} isError - 是否为错误
  */
-export function debounce(fn, ms) {
-  let timer;
-  return function(...args) {
-    clearTimeout(timer);
-    timer = setTimeout(() => fn.apply(this, args), ms);
-  };
+export function showToast(message, isError = false) {
+  if (window.lmShowToast) window.lmShowToast(message, isError);
+}
+
+/**
+ * 解包 Bridge API 响应
+ *
+ * 后端返回格式：
+ * - 成功：{status: "ok", data: {...}}
+ * - 失败：{status: "error", message: "..."}
+ *
+ * @param {Object} response - API 响应
+ * @returns {any} 解包后的数据
+ */
+export function unwrapResponse(response) {
+  if (response && response.status === "ok" && Object.prototype.hasOwnProperty.call(response, "data")) {
+    return response.data;
+  }
+  if (response && response.status === "error") {
+    if (response.code === "not_ready") {
+      /* 初始化未完成：交给全局横幅展示指引（重试/自动恢复），调用方仍收到错误。 */
+      if (typeof window !== "undefined" && typeof window.lmReportPluginNotReady === "function") {
+        window.lmReportPluginNotReady(response);
+      }
+      const notReadyError = new Error(response.message || window.t("misc.requestFailed"));
+      notReadyError.code = "not_ready";
+      throw notReadyError;
+    }
+    throw new Error(response.message || window.t("misc.requestFailed"));
+  }
+  return response || {};
+}
+
+/**
+ * 序列化容器内可编辑控件的当前值，作为编辑态脏检查基线
+ * @param {string} selector - 控件选择器
+ * @returns {string} 序列化后的快照
+ */
+export function captureFormSnapshot(selector) {
+  return JSON.stringify(Array.from(document.querySelectorAll(selector), input => input.value));
+}
+
+/**
+ * 判断编辑表单相对快照是否有未保存修改
+ * @param {string} selector - 控件选择器
+ * @param {string} snapshot - captureFormSnapshot 生成的快照
+ * @returns {boolean} 是否有未保存修改
+ */
+export function hasFormChanges(selector, snapshot) {
+  return captureFormSnapshot(selector) !== snapshot;
+}
+
+/**
+ * 有未保存修改时先确认是否丢弃；忙碌中直接拒绝离开
+ * @param {boolean} busy - 是否正在保存
+ * @param {boolean} hasUnsavedChanges - 是否存在未保存修改
+ * @returns {Promise<boolean>} 是否允许离开
+ */
+export async function canDiscardChanges(busy, hasUnsavedChanges) {
+  if (busy) {
+    showToast(window.t("flow.waitForSave"));
+    return false;
+  }
+  return !hasUnsavedChanges || await confirmDiscardChanges();
 }
 
 let discardRequest;
@@ -152,6 +209,39 @@ export function confirmDiscardChanges() {
     dialog.showModal();
   });
   return discardRequest;
+}
+
+/**
+ * 页面内通用确认框（原生 <dialog>，宿主 iframe 没有 allow-modals，不能用 window.confirm）。
+ *
+ * @param {Object} options
+ * @param {string} options.title - 标题
+ * @param {string} options.message - 正文（可含换行）
+ * @param {string} [options.confirmLabel] - 确认按钮文案，默认 common.confirm
+ * @param {boolean} [options.destructive] - true 时确认按钮用危险色
+ * @returns {Promise<boolean>} 用户是否确认
+ */
+export function confirmAction(options = {}) {
+  const dialog = document.getElementById("action-dialog");
+  if (!dialog) return Promise.resolve(false);
+  const titleEl = document.getElementById("action-dialog-title");
+  const messageEl = document.getElementById("action-dialog-message");
+  const confirmBtn = document.getElementById("action-dialog-confirm");
+  if (!titleEl || !messageEl || !confirmBtn) return Promise.resolve(false);
+  const previousFocus = document.activeElement || null;
+  titleEl.textContent = options.title || "";
+  messageEl.textContent = options.message || "";
+  confirmBtn.textContent = options.confirmLabel || window.t("common.confirm");
+  confirmBtn.classList.toggle("btn-danger", options.destructive !== false);
+  confirmBtn.classList.toggle("btn-primary", options.destructive === false);
+  dialog.returnValue = "cancel";
+  return new Promise((resolve) => {
+    dialog.addEventListener("close", () => {
+      resolve(dialog.returnValue === "confirm");
+      if (previousFocus && typeof previousFocus.focus === "function") previousFocus.focus();
+    }, { once: true });
+    dialog.showModal();
+  });
 }
 
 /**

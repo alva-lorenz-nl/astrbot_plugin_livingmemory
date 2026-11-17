@@ -10,8 +10,12 @@ from astrbot.api import logger, sp
 from astrbot.api.event import AstrMessageEvent
 from astrbot.api.star import Context
 
-from ..processors.text_processor import TextProcessor
-from .stopwords_manager import StopwordsManager, get_stopwords_manager
+from .formatting import (
+    attach_profile_to_memory_injection,
+    format_memories_for_injection,
+    format_profile_block_for_injection,
+    format_profile_for_injection,
+)
 
 
 class OperationContext:
@@ -116,8 +120,6 @@ async def get_conversation_id(context: Any, event: Any) -> str | None:
         if cid:
             return str(cid)
         umo = getattr(event, "unified_msg_origin", None)
-        if not umo and hasattr(event, "get_platform_id"):
-            umo = event.unified_msg_origin
         if umo and context and hasattr(context, "conversation_manager"):
             cm = context.conversation_manager
             if hasattr(cm, "get_curr_conversation_id"):
@@ -125,6 +127,28 @@ async def get_conversation_id(context: Any, event: Any) -> str | None:
     except Exception as e:
         logger.debug(f"获取对话线ID失败: {e}")
     return None
+
+
+def conversation_filtering_enabled(config_manager: Any) -> bool:
+    """对话线隔离开关；配置管理器缺失时按默认开启处理。"""
+    try:
+        return bool(
+            config_manager.get("filtering_settings.use_conversation_filtering", True)
+        )
+    except Exception:
+        return True
+
+
+def conversation_fallback_global(config_manager: Any) -> bool:
+    """是否放行未标记对话线的历史记忆。"""
+    try:
+        return bool(
+            config_manager.get(
+                "filtering_settings.fallback_to_global_conversations", True
+            )
+        )
+    except Exception:
+        return True
 
 
 def extract_json_from_response(text: str) -> str:
@@ -142,24 +166,14 @@ def extract_json_from_response(text: str) -> str:
 
 
 __all__ = [
-    "StopwordsManager",
-    "get_stopwords_manager",
-    "TextProcessor",
-    "safe_parse_metadata",
-    "validate_timestamp",
     "OperationContext",
     "get_persona_id",
+    "conversation_filtering_enabled",
+    "conversation_fallback_global",
     "get_conversation_id",
     "extract_json_from_response",
     "format_memories_for_injection",
+    "format_profile_for_injection",
+    "format_profile_block_for_injection",
+    "attach_profile_to_memory_injection",
 ]
-
-
-# ---- 记忆注入默认文本（后备） ----
-
-# 自 formatting.py 拆分模块导出（保持向后兼容）
-from .formatting import (
-    format_memories_for_injection,
-    safe_parse_metadata,
-    validate_timestamp,
-)

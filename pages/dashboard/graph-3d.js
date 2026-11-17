@@ -1,11 +1,10 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-import { prepareGraph, SPACE_COLORS } from "./graph-3d-core.js";
+import { prepareGraph } from "./graph-3d-core.js";
 import { MemoryGravity } from "./graph-3d-gravity.js";
 
 export default class Graph3D {
   constructor() {
-    this.colors = SPACE_COLORS;
     this.selection = null;
     this.showAllRelations = false;
     this.motionEnabled = true;
@@ -36,7 +35,6 @@ export default class Graph3D {
   init(container, callbacks = {}) {
     this.container = container;
     this.callbacks = callbacks;
-    this.motionEnabled = !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     this.scene = new THREE.Scene();
     this.camera = new THREE.PerspectiveCamera(48, 1, 0.1, 12000);
     this.renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true, powerPreference: "high-performance" });
@@ -75,7 +73,7 @@ export default class Graph3D {
     }
     this.dust = new THREE.Points(
       new THREE.BufferGeometry().setAttribute("position", new THREE.BufferAttribute(dust, 3)),
-      new THREE.PointsMaterial({ color: "#8498b0", size: 1.4, transparent: true, opacity: 0.3, depthWrite: false })
+      new THREE.PointsMaterial({ color: "#9db4ff", size: 1.4, transparent: true, opacity: 0.3, depthWrite: false })
     );
     this.scene.add(this.dust);
     // AstrBot plugin frames have an opaque origin; create the worker within it.
@@ -225,8 +223,9 @@ export default class Graph3D {
     const colors = new Float32Array(count * 3), sizes = new Float32Array(count), indices = new Float32Array(count);
     const stars = new Float32Array(count), pulsars = new Float32Array(count);
     const color = new THREE.Color();
+    const nodeColors = window.GraphShared.readNodeColors();
     this.graph.nodes.forEach((node, i) => {
-      color.set(SPACE_COLORS[node.type] || SPACE_COLORS.other).toArray(colors, i * 3);
+      color.set(nodeColors[node.type] || nodeColors.other).toArray(colors, i * 3);
       sizes[i] = node.size;
       indices[i] = i;
       stars[i] = node.type === "person" ? 0.35 : 0;
@@ -263,7 +262,7 @@ export default class Graph3D {
         if(vPulsar>0.){float beam=exp(-abs(dot(point,vec2(-vBeam.y,vBeam.x)))*55.)*exp(-r*2.5);
           float ring=exp(-pow((r-vRing)*35.,2.))*.12*(1.-vRing);
           emission=vEmission*(beam*.25+ring)+vPulsar*exp(-r*r*2.8)*.025;}
-        vec3 tint=mix(vColor,vec3(1.,.94,.82),core*.6);tint=mix(tint,vec3(.86,.94,1.),min(.45,emission*.6));
+        vec3 tint=mix(vColor,vec3(.94,.97,1.),core*.6);tint=mix(tint,vec3(.86,.94,1.),min(.45,emission*.6));
         gl_FragColor=vec4(tint,(core*vCore+glow+corona+emission)*vAlpha);
         #include <colorspace_fragment>
         }`,
@@ -277,12 +276,12 @@ export default class Graph3D {
     this.edgeGeometry = new THREE.BufferGeometry().setAttribute("position", this.positions);
     this.edgeGeometry.setIndex(new THREE.BufferAttribute(lineIndices, 1));
     this.edges = new THREE.LineSegments(this.edgeGeometry,
-      new THREE.LineBasicMaterial({ color: "#d2b993", transparent: true, depthWrite: false }));
+      new THREE.LineBasicMaterial({ color: "#9fb4f0", transparent: true, depthWrite: false }));
     this.graphGroup.add(this.edges);
     const focusGeometry = new THREE.BufferGeometry().setAttribute("position", this.positions);
     focusGeometry.setIndex([]);
     this.focusEdges = new THREE.LineSegments(focusGeometry,
-      new THREE.LineBasicMaterial({ color: "#f4d19b", transparent: true, opacity: 0.55, depthWrite: false }));
+      new THREE.LineBasicMaterial({ color: "#d6e2ff", transparent: true, opacity: 0.6, depthWrite: false }));
     this.graphGroup.add(this.focusEdges);
     this._updateRelations();
   }
@@ -291,7 +290,7 @@ export default class Graph3D {
     const count = Math.min(24000, this.graph.nodes.length * 12);
     const positions = new Float32Array(count * 3), centers = new Float32Array(count * 3), spins = new Float32Array(count * 3);
     const colors = new Float32Array(count * 3), sizes = new Float32Array(count), systems = new Float32Array(count), haze = new Float32Array(count);
-    const warm = new THREE.Color("#d9ac75"), cool = new THREE.Color("#7199cd"), tint = new THREE.Color();
+    const warm = new THREE.Color("#ffd3a1"), cool = new THREE.Color("#6f8fff"), tint = new THREE.Color();
     for (let i = 0; i < count; i++) {
       const node = i % this.graph.nodes.length, community = data.communityIds[node], center = data.hubs[community] * 3;
       const radius = data.communityRadii[community], seed = (i * 0.61803398875) % 1;
@@ -345,7 +344,7 @@ export default class Graph3D {
   _buildCommunityLinks(data) {
     this._bundleCount = data.bundleWeights.length;
     if (!this._bundleCount) return;
-    const positions = [], colors = [], color = new THREE.Color("#aab7d2");
+    const positions = [], colors = [], color = new THREE.Color("#8fa6e8");
     for (let i = 0; i < this._bundleCount; i++) {
       const source = data.bundlePairs[i*2], target = data.bundlePairs[i*2+1];
       const a = new THREE.Vector3().fromBufferAttribute(this.positions, data.hubs[source]);
@@ -540,7 +539,7 @@ export default class Graph3D {
       fromPosition: this.camera.position.clone(), fromTarget: this.controls.target.clone(),
       position: position.clone(), target: target.clone(), fromFocus: this.uniforms.focus.value, focus,
       fromOffset: { ...this._viewOffset }, offset,
-      started: performance.now(), duration: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 1 : 1050,
+      started: performance.now(), duration: 1050,
     };
     this._schedule();
   }
@@ -711,17 +710,5 @@ export default class Graph3D {
     this.renderer.dispose();
     this.renderer.forceContextLoss();
     this.container.replaceChildren();
-  }
-
-  getDiagnostics() {
-    return {
-      sourceNodes: this.graph?.nodes.length || 0, sourceEdges: this._payload?.snapshot.edges.length || 0,
-      renderedRelations: this.graph ? this.edgeGeometry.drawRange.count / 2 : 0,
-      drawCalls: this.renderer.info.render.calls, layoutMs: this._layoutMs || 0,
-      renderedCommunityLinks: this.communityLines?.visible ? this._bundleCount : 0,
-      framePending: this._frame !== null, layoutReady: this._ready, animating: !!this._flight,
-      motionEnabled: this.motionEnabled, movingNodes: this._gravity?.movingCount || 0,
-      cameraDistance: this.camera.position.distanceTo(this.controls.target),
-    };
   }
 }

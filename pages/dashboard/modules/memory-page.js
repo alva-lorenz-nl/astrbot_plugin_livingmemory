@@ -3,7 +3,7 @@
  * 负责记忆列表展示、虚拟滚动、筛选和排序
  */
 
-import { normalizeImportance, esc, statusPill, typeLabel, originLabel } from "./utils.js";
+import { normalizeImportance, esc, statusPill, typeLabel, originLabel, showToast } from "./utils.js";
 
 export class MemoryPage {
   constructor(state, apiClient, peekPanel) {
@@ -66,12 +66,12 @@ export class MemoryPage {
         memory_id: item.id,
         doc_id: item.doc_id,
         summary:
-          (item.metadata && item.metadata.persona_summary) ||
           item.summary ||
+          (item.metadata && (item.metadata.persona_summary || item.metadata.canonical_summary)) ||
           item.text ||
           item.content ||
           "",
-        content: item.text || item.content,
+        content: item.summary || item.text || item.content,
         memory_type: (item.metadata && item.metadata.memory_type) || "GENERAL",
         importance: normalizeImportance(item.metadata && item.metadata.importance),
         importance_scale: "display",
@@ -86,9 +86,11 @@ export class MemoryPage {
             : item.updated_at || "--",
         origin: (item.metadata && item.metadata.memory_origin) || "",
         summary_quality: (item.metadata && item.metadata.summary_quality) || "",
-        consolidated_count: (item.metadata && Array.isArray(item.metadata.consolidated_from))
-          ? item.metadata.consolidated_from.length
-          : 0,
+        consolidated_count: item.consolidated_count != null
+          ? Number(item.consolidated_count) || 0
+          : (item.metadata && Array.isArray(item.metadata.consolidated_from))
+            ? item.metadata.consolidated_from.length
+            : 0,
         raw: item,
       }));
       this.state.memory.selectedIds.clear();
@@ -117,7 +119,8 @@ export class MemoryPage {
     const scroll = doc.getElementById("memories-scroll");
     if (feedback) {
       feedback.hidden = !loading && !error;
-      feedback.classList.toggle("is-error", Boolean(error));
+      feedback.classList.toggle("is-loading", loading);
+      feedback.classList.toggle("is-error", Boolean(error) && !loading);
     }
     if (message) message.textContent = loading ? window.t("common.loading") : error;
     if (retry) retry.hidden = !error || loading;
@@ -272,7 +275,10 @@ export class MemoryPage {
   renderEmpty() {
     const tbody = document.getElementById("memories-body");
     const columns = window.matchMedia?.("(max-width: 768px)").matches ? 4 : 7;
-    tbody.innerHTML = '<tr><td colspan="' + columns + '" class="table-empty">' + window.t("table.noData") + '</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="' + columns + '" class="table-empty">' +
+      '<div class="empty-state"><i data-lucide="database" aria-hidden="true"></i><span>' +
+      window.t("table.noData") + "</span></div></td></tr>";
+    window.lmHydrateIcons?.();
     tbody.style.paddingTop = "0";
     tbody.style.paddingBottom = "0";
     this.updateSelectionControls();
@@ -369,16 +375,16 @@ export class MemoryPage {
       if (deleted !== ids.length) {
         const failedIds = Array.isArray(result.failed_ids) ? result.failed_ids : [];
         const failed = ids.length - deleted;
-        this.showToast(window.t("delete.partialFailed", deleted, failed, failedIds.join(", ") || "--"), true);
+        showToast(window.t("delete.partialFailed", deleted, failed, failedIds.join(", ") || "--"), true);
       } else {
-        this.showToast(window.t("delete.success", deleted));
+        showToast(window.t("delete.success", deleted));
       }
       this.state.memory.selectedIds.clear();
       this.peek.close();
       await this.fetch();
     } catch (error) {
       this.peek.close();
-      this.showToast(error.message || window.t("delete.error"), true);
+      showToast(error.message || window.t("delete.error"), true);
       this.updateSelectionControls();
     } finally {
       this._bulkBusy = false;
@@ -413,16 +419,16 @@ export class MemoryPage {
       const updated = Number(result.updated_count || 0);
       const failed = Number(result.failed_count || 0);
       if (failed > 0) {
-        this.showToast(window.t("batchEdit.partialFailed", updated, failed), true);
+        showToast(window.t("batchEdit.partialFailed", updated, failed), true);
       } else {
-        this.showToast(window.t("batchEdit.success", updated));
+        showToast(window.t("batchEdit.success", updated));
       }
       this.state.memory.selectedIds.clear();
       this.peek.close();
       await this.fetch();
     } catch (error) {
       this.peek.close();
-      this.showToast(error.message || window.t("batchEdit.error"), true);
+      showToast(error.message || window.t("batchEdit.error"), true);
       this.updateSelectionControls();
     } finally {
       this._bulkBusy = false;
@@ -454,7 +460,16 @@ export class MemoryPage {
       link.click();
       link.remove();
       URL.revokeObjectURL(url);
-      this.setTransferStatus(window.t("transfer.exportSuccess", Number(result.memory_count || 0)));
+      const exportedCount = Number(result.memory_count || 0);
+      const availableCount = Number(result.total_available || exportedCount);
+      if (result.truncated) {
+        this.setTransferStatus(
+          window.t("transfer.exportTruncated", exportedCount, availableCount),
+          true
+        );
+      } else {
+        this.setTransferStatus(window.t("transfer.exportSuccess", exportedCount));
+      }
     } catch (error) {
       this.setTransferStatus(error.message || window.t("transfer.failed"), true);
     } finally {
@@ -515,13 +530,15 @@ export class MemoryPage {
       );
       this.peek.close();
       const failed = Number(result.failed_count || 0);
+      const remapped = Number(result.remapped_session_count || 0);
+      const importedText = window.t(
+        "transfer.importSuccess",
+        Number(result.imported_count || 0),
+        Number(result.skipped_duplicate_count || 0),
+        failed
+      );
       this.setTransferStatus(
-        window.t(
-          "transfer.importSuccess",
-          Number(result.imported_count || 0),
-          Number(result.skipped_duplicate_count || 0),
-          failed
-        ),
+        importedText + (remapped > 0 ? window.t("transfer.sessionRemapped", remapped) : ""),
         failed > 0
       );
       await this.fetch();
@@ -693,16 +710,5 @@ export class MemoryPage {
         this.fetch();
       }
     });
-  }
-
-  /**
-   * 显示 Toast 提示
-   * @param {string} message - 提示消息
-   * @param {boolean} isError - 是否为错误
-   */
-  showToast(message, isError = false) {
-    if (window.lmShowToast) {
-      window.lmShowToast(message, isError);
-    }
   }
 }

@@ -21,9 +21,9 @@
 
 LivingMemory gives AstrBot a durable store of preferences, relationships, project progress and past agreements. It summarizes conversations, recalls relevant context through keywords, vectors and a graph, and manages memory through archiving, decay and access reinforcement.
 
-> **Latest stable: 2.9.0**<br>
-> Adapter sharing and legacy ownership migration, bounded summaries, and fixes for history cursors and consolidation isolation.<br>
-> [Download 2.9.0](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/releases/tag/2.9.0) · [Releases and upgrades](https://lxfight-s-astrbot-plugins.github.io/astrbot_plugin_livingmemory/en/releases) · [Earlier releases](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/releases)
+> **Latest stable: 2.10.0**<br>
+> Fixes recall noise and retention policy, cuts summary and injection cost, and adds data diagnostics and quality regression gates.<br>
+> [Download 2.10.0](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/releases/tag/2.10.0) · [Releases and upgrades](https://lxfight-s-astrbot-plugins.github.io/astrbot_plugin_livingmemory/en/releases) · [Earlier releases](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/releases)
 
 ## From remembering to recalling
 
@@ -34,7 +34,7 @@ LivingMemory gives AstrBot a durable store of preferences, relationships, projec
 
 ## One workspace, four styles
 
-**Editorial** offers green grids and crisp lines; **Studio** uses soft cards; **Paper** pairs warm surfaces with serif headings; **Terminal** combines monospace type with instrument panels.
+**macOS 26** offers floating Liquid Glass over a wallpaper; **Studio** uses soft cards; **Paper** pairs warm surfaces with serif headings; **Terminal** combines monospace type with instrument panels.
 
 Every style supports light, dark and automatic modes. Switch from “Appearance” in the dashboard; preferences stay in the current browser. Graph labels settle during zoomed reading, and mobile controls support session filtering and memory focus.
 

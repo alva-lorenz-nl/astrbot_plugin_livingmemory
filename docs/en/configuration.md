@@ -6,7 +6,7 @@
 LivingMemory defaults work for most users. The settings you usually need to touch are model providers, recall size, memory isolation, graph retrieval, backup, and cleanup.
 
 > [!NOTE]
-> Every numeric config item has a hard allowed range, shown on the AstrBot config page as a slider plus number field and in the tables below. Out-of-range values are clamped to the nearest bound on plugin load (invalid values fall back to that item's default), each fix is logged as a warning and written back to the config file — a single bad value no longer resets the whole config to defaults.
+> Every numeric config item has a hard allowed range, shown on the dashboard Settings page as a number field with its allowed range, and in the tables below. The plugin validates the whole configuration against its Pydantic model on startup: out-of-range values, wrong types or invalid enums fail startup with an error instead of being clamped or reset to defaults; fix the reported item and restart.
 
 ## Recommended profiles
 
@@ -46,6 +46,18 @@ Before manually transferring a batch, pause the affected adapters and wait for r
 
 Management APIs accept an `adapter_id` query parameter to select the configured range; `page/memories?adapter_id=qq-main` still intersects existing session filters. `POST page/adapters/assign` accepts the target `adapter_id`, old `source_adapter_id` and `session_id`: a null source adapter assigns unowned records for that old scope; a specified source transfers that instance's records. The endpoint uses AstrBot Plugin Views authentication.
 
+## User profile
+
+| Setting | Default | Description |
+| --- | --- | --- |
+| `profile_settings.enabled` | `true` | Enable the structured user profile per memory scope + persona |
+| `profile_settings.max_chars` | `300` | Character budget for the injected profile text, independent of the memory budget |
+| `profile_settings.min_confidence` | `0.6` | Minimum confidence for a profile update to apply directly; lower values become pending candidates |
+| `profile_settings.history_limit` | `20` | Number of history versions kept per profile |
+| `profile_settings.max_pending` | `50` | Maximum pending candidates kept per profile |
+
+During summarization the model may optionally output `profile_updates` in the same summary JSON (sections `basic` / `preferences` / `status` / `task_preferences`): `set` requires evidence and confidence, `append` de-duplicates into preference lists, and `remove` requires evidence. Every applied update writes a history version, and the profile can be viewed, edited, deleted and its pending candidates resolved from the dashboard user-profile page. The profile does not consume recall `top_k` slots but counts toward the injection character budget; disabling `profile_settings.enabled` stops all profile reads and writes.
+
 ## Model providers
 
 | Key | Default | Description |
@@ -53,12 +65,16 @@ Management APIs accept an `adapter_id` query parameter to select the configured 
 | `provider_settings.embedding_provider_id` | empty (not recommended) | Generates memory vectors; fill in an enabled Embedding Provider ID. An empty value only falls back to the first available provider, which may pick the wrong model or break vector/graph index initialization |
 | `provider_settings.llm_provider_id` | empty | Summarizes conversations and evaluates memory importance. Empty means AstrBot's default LLM |
 | `provider_settings.llm_stream_mode` | `auto` | How memory processing calls the LLM: `auto` tries non-streaming first and switches to streaming when the provider reports non-stream requests are unsupported; `always` always streams; `never` always uses non-streaming (previous behavior) |
+| `provider_settings.llm_fallback_provider_ids` | `[]` | Ordered fallback Provider IDs tried when the primary LLM fails (JSON array). Switches on timeout, rate limit (429), 5xx or authentication failures; parsing/format errors do not switch. Empty disables fallback |
+| `provider_settings.llm_call_timeout_seconds` | `60` | Timeout for each provider's single call (seconds, 5-600). A timeout treats that provider as unavailable and switches to the next one |
 
 Try to keep the embedding model stable. If you change it and old memories recall poorly, run `/lmem rebuild-index`.
 
 See [Embedding Models and BGE-M3](/en/guide/embedding-model) for the SiliconFlow free BGE-M3 parameters, locating the Provider ID, and verification steps.
 
 Providers that only accept streaming requests (`stream=true`) are switched to streaming automatically in `auto` mode; set `always` to force streaming. An interrupted stream, timeout, or missing complete response is treated as a failure, so incomplete results are never written to memory.
+
+With fallback providers configured, the primary provider switches to the next fallback ID on timeout, rate limits, 5xx or authentication failures. Within one provider only transient errors are retried once; JSON parsing, validation or request-format errors never switch providers. Fallback calls record the actual provider ID and fallback count, and `/lmem status` shows the fallback count.
 
 ## Session management
 
@@ -81,10 +97,11 @@ History above `max_messages_per_session` first discards summarized messages. If 
 | `recall_engine.max_k` | `10` | Maximum results returned by active agent recall |
 | `recall_engine.importance_weight` | `1.0` | Importance weight in final ranking |
 | `recall_engine.min_importance_for_retrieval` | `0.0` | Minimum importance; `0` disables the filter |
-| `recall_engine.min_similarity_for_retrieval` | `0.0` | Minimum vector similarity; keyword-only hits remain eligible |
-| `recall_engine.recent_memory_count` | `2` | Recall slots reserved for recent memories |
+| `recall_engine.min_similarity_for_retrieval` | `0.45` | Minimum vector similarity; keyword-only hits remain eligible; `0` disables the filter |
+| `recall_engine.recent_memory_count` | `0` | Recent memories used only to fill remaining slots when relevant results are insufficient |
 | `recall_engine.recent_memory_max_age_hours` | `72` | Time window for recent-memory slots |
 | `recall_engine.memory_type_filter` | `all` | Use `event_only` to exclude known preference-only or relationship-only memories |
+| `recall_engine.tokenizer` | `jieba` | Chinese tokenizer: `jieba` word segmentation, or `builtin` (no jieba import, ~55 MB less memory); run `/lmem rebuild-index` after switching |
 | `recall_engine.fallback_to_vector` | `true` | Falls back to vector search if hybrid retrieval fails |
 | `recall_engine.rerank_enabled` | `false` | Reranks fused candidates by query relevance with a Rerank model |
 | `recall_engine.rerank_provider_id` | `""` | ID of a Rerank-type provider in AstrBot; leave empty to skip |
@@ -115,6 +132,17 @@ History above `max_messages_per_session` first discards summarized messages. If 
 
 Aliases are matched in this order: `platform:user ID`, user ID, then current username. The mapped display name is applied before summarization. Scope changes affect newly written memories only; existing memories are not migrated or re-embedded automatically.
 
+## Channel memory
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `channel_memory.enabled` | `false` | Stores group summaries in a shared per-group channel scope so members can recall them; off keeps the previous behavior |
+| `channel_memory.min_user_slots` | `1` | Minimum personal/session results kept during merged recall (0-5) |
+| `channel_memory.min_channel_slots` | `1` | Minimum channel-scope results kept during merged recall (0-5) |
+| `channel_memory.include_archived` | `false` | Archived memories stay excluded by default; enabling relaxes the status filter only for channel-scope results |
+
+The channel scope is `livingmemory:channel:<platform>:<group id>`, derived from group events. `enabled` is off by default and changes neither writes nor recall while off. When on, group summaries land in the channel pool while personal memories (private summaries and explicit writes) keep their own scopes; automatic group recall searches the current scope and the channel scope together within one `top_k` budget, keeping `min_user_slots` / `min_channel_slots` results when available. Persona, adapter and allowlist isolation still apply, and toggling the feature never migrates existing memories.
+
 ## Reflection and lifecycle
 
 | Key | Default | Description |
@@ -126,10 +154,10 @@ Aliases are matched in this order: `platform:user ID`, user ID, then current use
 | `reflection_engine.window_split_gap_minutes` | `180` | Summarizes only the oldest segment when the idle gap between messages exceeds this many minutes; `0` disables gap splitting |
 | `reflection_engine.include_source_time_tags` | `true` | Derives source date tags from original message timestamps |
 | `reflection_engine.source_retention_importance_threshold` | `0.8` | Retains original messages separately at or above the threshold |
-| `importance_decay.decay_rate` | `0.01` | Daily importance decay |
+| `importance_decay.decay_rate` | `0.005` | Daily importance decay (0.5% per day by default) |
 | `importance_decay.access_decay_window_days` | `30.0` | Time window for access reinforcement |
 | `importance_decay.access_decay_max_count` | `10` | Maximum access reinforcement count |
-| `importance_decay.protected_importance_threshold` | `1.0` | Memories at or above this importance do not decay |
+| `importance_decay.protected_importance_threshold` | `0.6` | Memories at or above this importance do not decay |
 
 Lower `summary_trigger_rounds` if you want the bot to remember faster. Raise it if you want fewer LLM calls.
 
@@ -150,9 +178,9 @@ Each input contains at most `max_messages_per_segment` messages; earlier day/idl
 | `agent_tools.forget_tool_max_memories` | `3` | Maximum memories a single forget call may archive (1-10); larger requests are rejected entirely |
 | `agent_tools.forget_tool_cooldown_seconds` | `60` | Minimum interval between successful archives in one session (0-3600); `0` disables the limit |
 | `agent_tools.enable_agentic_recall_beta` | `false` | Enables multi-turn agentic recall (beta); requires `enable_recall_tool` |
-| `agent_tools.agentic_recall_max_calls` | `4` | Shared recall/evidence tool calls allowed per request (1-20) |
+| `agent_tools.agentic_recall_max_calls` | `3` | Shared recall/evidence tool calls allowed per request (1-20) |
 | `agent_tools.agentic_recall_time_budget_seconds` | `20` | Cumulative memory-tool time per request in seconds (1-300) |
-| `agent_tools.agentic_recall_max_result_chars` | `12000` | Maximum characters returned by one beta memory-tool call (500-100000); longer output continues via cursors |
+| `agent_tools.agentic_recall_max_result_chars` | `6000` | Maximum characters returned by one beta memory-tool call (500-100000); longer output continues via cursors |
 
 The write tool is powerful and depends on model discipline. Start with active recall, then enable active writes after observing stable behavior.
 
@@ -181,13 +209,13 @@ For relationship-heavy use, increase graph-route weight or set `expansion_hops` 
 | `migration_settings.auto_migrate` | `true` | Migrates old databases at startup |
 | `migration_settings.create_backup` | `true` | Creates a backup before migration |
 | `backup_settings.enabled` | `true` | Daily database backup |
-| `backup_settings.keep_days` | `7` | Backup retention days |
+| `backup_settings.keep_days` | `7` | Daily backup retention; version backups keep only the 2 newest and total backup size is capped at 512 MB |
 | `forgetting_agent.auto_cleanup_enabled` | `true` | Daily cleanup for old low-importance memories |
-| `forgetting_agent.auto_archived_enabled` | `false` | Archives cleanup candidates outside retrieval indexes instead of deleting them |
-| `forgetting_agent.cleanup_days_threshold` | `30` | Age threshold for cleanup candidates |
-| `forgetting_agent.cleanup_importance_threshold` | `0.3` | Importance threshold for cleanup candidates |
+| `forgetting_agent.auto_archived_enabled` | `true` | Archives cleanup candidates outside retrieval indexes instead of deleting them |
+| `forgetting_agent.cleanup_days_threshold` | `120` | Age threshold for cleanup candidates |
+| `forgetting_agent.cleanup_importance_threshold` | `0.25` | Importance threshold for cleanup candidates |
 
-With automatic archiving enabled, source documents remain visible and restorable in the Dashboard. Restoring regenerates the embedding and rebuilds BM25, graph, and memory-atom indexes.
+Automatic archiving is enabled by default; source documents remain visible and restorable in the Dashboard. Restoring regenerates the embedding and rebuilds BM25, graph, and memory-atom indexes.
 
 ## Memory store consolidation
 
@@ -211,6 +239,8 @@ Memory consolidation controls the memory-store size at the source: scattered low
 
 Use that path to check that the database parent directory is available and writable by the account running AstrBot. Include the diagnostic log and full traceback when reporting the error. Version 2.7.3 already fixed transactions retaining locks after exceptions, cancellation or commit failure; remaining open failures need the actual SQLite error code to identify their cause.
 
+`disk I/O error` maps to `SQLITE_IOERR`: when the data directory lives on a shared filesystem such as a Docker Desktop bind mount or a network share, SQLite cannot use the WAL `-shm` shared-memory index and new connections joining WAL fail. The plugin identifies the mount type and probes WAL at startup, falling back to rollback journal with a log hint when WAL is unavailable; moving the data directory onto a Docker named volume or a local disk restores WAL automatically.
+
 ## Index rebuild tuning
 
 | Key | Default | Description |
@@ -223,3 +253,18 @@ Use that path to check that the database parent directory is available and writa
 | `index_rebuild_settings.max_failure_ratio` | `0.02` | Allowed failure ratio |
 
 If you hit API rate limits, increase `request_delay` first, then lower `embedding_batch_size`. Avoid raising concurrency blindly; index rebuilds are more about finishing reliably than finishing aggressively.
+
+## Recall tracing
+
+`trace_settings` records explainable traces for every memory recall: per-route candidate counts and latency, rejection reasons from the retrieval policy, and the final injected memory count and characters. Traces stay in an in-process ring buffer (`max_records`) and are served by `/lmem trace` and the Page API; disk persistence and raw query text are off by default, and only `query_hash` is stored.
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `trace_settings.enabled` | `true` | Record no trace data at all when disabled |
+| `trace_settings.max_records` | `50` | Recent traces kept in memory; `0` disables the buffer |
+| `trace_settings.persist_enabled` | `false` | Append daily JSONL files under the plugin data directory |
+| `trace_settings.include_query_text` | `false` | Store raw query text; only a hash is stored by default |
+| `trace_settings.max_file_mb` | `10` | Per-file size cap; appends stop for the day once reached |
+| `trace_settings.retention_days` | `7` | Trace retention days; expired files are pruned on the next write |
+
+With `persist_enabled` on, traces are appended daily under the `recall_traces` directory. The Page API exposes `traces` and `traces/stats` for traces, and the `memories` lineage endpoint returns source messages, supersede chain, graph context and traces that cited the memory.

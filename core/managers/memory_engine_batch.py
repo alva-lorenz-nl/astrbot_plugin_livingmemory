@@ -1,43 +1,60 @@
-"""
-MemoryEngine 的 MemoryEngineBatchMixin 拆分模块
-自动从 core/managers/memory_engine.py 拆分，保持行为不变
-"""
+"""批量维护、衰减与访问统计。"""
 
-from typing import Any
 import asyncio
-from ..utils.json_utils import safe_json_dict
-from ..utils.number_utils import clamp_float, safe_float
-from ..processors.atom_classifier import classify_atoms
-from ..memory_scope import adapter_sql, current_adapter_access
-from ..retrieval.vector_search import retrieve_documents
-
 import json
-from astrbot.api import logger
-from pathlib import Path
 import time
+from collections import OrderedDict
+from typing import Any
 
 import aiosqlite
 
+from astrbot.api import logger
+
 from ...storage.atom_store import AtomStore
+from ..memory_scope import (
+    adapter_sql,
+    current_adapter_access,
+)
+from ..processors.atom_classifier import classify_atoms
+from ..retrieval.hybrid_retriever import HybridResult
+from ..retrieval.vector_search import retrieve_documents
+from ..utils.json_utils import safe_json_dict
+from ..utils.number_utils import clamp_float, safe_float
+from .agentic_recall_types import AgenticRecallOutcome as AgenticRecallOutcome
 
 
 class MemoryEngineBatchMixin:
-    """MemoryEngine 拆分模块：MemoryEngineBatchMixin
+    """MemoryEngine 的 MemoryEngineBatchMixin 分组。
 
-    下述类级注解声明本模块依赖的宿主共享状态（由 MemoryEngine.__init__ /
-    initialize 赋值），仅作类型约束，不在此赋默认值。
+    宿主共享状态由 ``MemoryEngine`` 独占持有，本模块只通过 self 访问。
     """
 
-    # 宿主共享状态契约
+    # 访问统计合并窗口：窗口内的多次召回合并为一次 UPDATE
+    _ACCESS_UPDATE_DEBOUNCE_SECONDS = 3.0
+
+    # 宿主共享状态契约（由 MemoryEngine.__init__ / initialize 赋值）
     db_connection: aiosqlite.Connection | None
     config: dict[str, Any]
-    faiss_db: Any
     db_path: str
+    faiss_db: Any
+    atom_enabled: bool
     atom_store: AtomStore | None
+    atom_retriever: Any | None
     vector_retriever: Any | None
     bm25_retriever: Any | None
+    hybrid_retriever: Any | None
+    index_writer: Any | None
+    dual_route_retriever: Any | None
     graph_memory_manager: Any | None
     graph_store: Any | None
+    _search_cache_enabled: bool
+    _search_cache_ttl: float
+    _search_cache_max_size: int
+    _search_cache_generation: int
+    _search_cache: OrderedDict[tuple[Any, ...], tuple[float, list[HybridResult]]]
+    _access_update_pending: set[int]
+    _access_atom_update_pending: set[int]
+    _access_flush_task: asyncio.Task | None
     index_maintenance_status: dict[str, Any]
 
     async def batch_delete_memories(self, memory_ids: list[int]) -> int:
@@ -345,7 +362,7 @@ class MemoryEngineBatchMixin:
             for atom in atoms:
                 atom.metadata["adapter_id"] = metadata.get("adapter_id")
                 if metadata.get("conversation_id"):
-                    atom.metadata["conversation_id"] = metadata.get("conversation_id")
+                    atom.metadata["conversation_id"] = metadata["conversation_id"]
                 atom.parent_memory_id = memory_id
             if atoms and self.atom_store is not None:
                 await self.atom_store.insert_many(atoms)
@@ -375,6 +392,125 @@ class MemoryEngineBatchMixin:
             if self.atom_store is not None:
                 await self.atom_store.delete_by_parent(memory_id)
             raise
+
+    # 运行时旧会话迁移的全局完成标记（migration_status.key）
+    _RUNTIME_MIGRATION_FLAG_KEY = "runtime_session_migration_v1"
+    _RUNTIME_MIGRATION_MARKER_PREFIX = "migrated_umo_"
+
+    async def _runtime_session_migration_needed(self, unified_msg_origin: str) -> bool:
+        """判断当前会话是否还需要跑一次旧格式 session_id 迁移。
+
+        热路径（每次召回）调用：已完成的迁移由进程内状态短路，只有进程内首次
+        调用或未完成迁移的会话才会查 ``migration_status``。库里没有旧格式
+        session_id 数据时写一次全局完成标记，之后本进程不再触发任何迁移任务。
+
+        Args:
+            unified_msg_origin: 当前会话的 unified_msg_origin。
+
+        Returns:
+            True 表示需要调度后台迁移任务。
+        """
+        if self._runtime_migration_finished:
+            return False
+        if unified_msg_origin in self._runtime_migration_checked_sessions:
+            return False
+        if self.db_connection is None:
+            return False
+
+        if not self._runtime_migration_flag_loaded:
+            self._runtime_migration_flag_loaded = True
+            flag = await self._read_migration_status_value(
+                self._RUNTIME_MIGRATION_FLAG_KEY
+            )
+            if str(flag or "").casefold() == "true":
+                self._runtime_migration_finished = True
+                return False
+            if not await self._has_legacy_session_rows():
+                await self._write_runtime_migration_flag()
+                self._runtime_migration_finished = True
+                return False
+
+        marker = await self._read_migration_status_value(
+            f"{self._RUNTIME_MIGRATION_MARKER_PREFIX}{unified_msg_origin}"
+        )
+        if str(marker or "").casefold() == "true":
+            self._runtime_migration_checked_sessions.add(unified_msg_origin)
+            return False
+        return True
+
+    async def _read_migration_status_value(self, key: str) -> str | None:
+        """读取 migration_status 单键值；读取失败按缺失处理。"""
+        if self.db_connection is None:
+            return None
+        try:
+            cursor = await self.db_connection.execute(
+                "SELECT value FROM migration_status WHERE key = ?", (key,)
+            )
+            row = await cursor.fetchone()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("[自动迁移] 读取 migration_status 失败", exc_info=True)
+            return None
+        return str(row[0]) if row and row[0] is not None else None
+
+    async def _has_legacy_session_rows(self) -> bool:
+        """判断 documents 中是否还有未 unified_msg_origin 化的旧会话数据。"""
+        if self.db_connection is None:
+            return False
+        try:
+            cursor = await self.db_connection.execute(
+                "SELECT 1 FROM documents WHERE json_valid(metadata) "
+                "AND json_extract(metadata, '$.session_id') IS NOT NULL "
+                "AND json_extract(metadata, '$.session_id') NOT LIKE '%:%' "
+                "LIMIT 1"
+            )
+            return await cursor.fetchone() is not None
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("[自动迁移] 检查旧会话数据失败", exc_info=True)
+            return False
+
+    async def _write_runtime_migration_flag(self) -> None:
+        """写入“旧会话数据已清理完毕”的全局标记（失败只记日志）。"""
+        if self.db_connection is None:
+            return
+        try:
+            async with self._write_transaction() as connection:
+                await connection.execute(
+                    "INSERT OR REPLACE INTO migration_status "
+                    "(key, value, updated_at) VALUES (?, 'true', datetime('now'))",
+                    (self._RUNTIME_MIGRATION_FLAG_KEY,),
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("[自动迁移] 写入运行期迁移标记失败", exc_info=True)
+
+    async def _finish_runtime_session_migration(self, unified_msg_origin: str) -> None:
+        """记录单会话迁移完成；若库里已无旧数据则写全局完成标记。"""
+        self._runtime_migration_checked_sessions.add(unified_msg_origin)
+        if self._runtime_migration_finished:
+            return
+        if await self._has_legacy_session_rows():
+            return
+        await self._write_runtime_migration_flag()
+        self._runtime_migration_finished = True
+
+    def _schedule_runtime_session_migration(self, unified_msg_origin: str) -> None:
+        """调度单会话后台迁移任务（同一会话 in-flight 去重）。"""
+        if unified_msg_origin in self._runtime_migration_inflight:
+            return
+        self._runtime_migration_inflight.add(unified_msg_origin)
+        task = self._create_tracked_task(
+            self._migrate_session_data_if_needed(unified_msg_origin)
+        )
+        task.add_done_callback(
+            lambda _task, umo=unified_msg_origin: (
+                self._runtime_migration_inflight.discard(umo)
+            )
+        )
 
     async def _migrate_session_data_if_needed(self, unified_msg_origin: str) -> None:
         """
@@ -433,7 +569,8 @@ class MemoryEngineBatchMixin:
             )
             row = await cursor.fetchone()
             if row and row[0] == "true":
-                # 已迁移过，跳过
+                # 已迁移过，跳过；同时写入进程内缓存，后续召回不再触发本任务
+                self._runtime_migration_checked_sessions.add(unified_msg_origin)
                 return
 
             # 4. 查找所有需要迁移的记录
@@ -458,6 +595,7 @@ class MemoryEngineBatchMixin:
                         "INSERT OR REPLACE INTO migration_status (key, value, updated_at) VALUES (?, ?, datetime('now'))",
                         (migration_key, "true"),
                     )
+                await self._finish_runtime_session_migration(unified_msg_origin)
                 return
 
             logger.info(f"[自动迁移] 找到 {len(rows)} 条旧数据需要迁移")
@@ -497,299 +635,283 @@ class MemoryEngineBatchMixin:
             logger.info(
                 f"[自动迁移] 完成！已更新 {updated_count} 条记录 -> {unified_msg_origin}"
             )
+            await self._finish_runtime_session_migration(unified_msg_origin)
 
         except asyncio.CancelledError:
             raise
         except Exception as e:
             logger.error(f"[自动迁移] 迁移失败: {e}", exc_info=True)
 
-    async def get_statistics(self) -> dict[str, Any]:
-        """
-        获取记忆统计信息（使用批量处理避免内存问题）
+    async def rebuild_graph_index(self) -> dict[str, int]:
+        """Stream active documents into a safe graph-memory rebuild."""
+        if self.graph_memory_manager is None:
+            return {"rebuilt": 0, "skipped": 0}
 
-        Returns:
-            Dict: 统计信息,包含:
-                - total_memories: 总记忆数
-                - sessions: 各会话的记忆数（按UUID分组）
-                - status_breakdown: 各状态的记忆数
-                - avg_importance: 平均重要性
-                - oldest_memory: 最旧记忆时间
-                - newest_memory: 最新记忆时间
-        """
-        try:
-            if self.db_connection is None:
-                raise RuntimeError("数据库连接未初始化")
+        if self.db_connection is None:
+            raise RuntimeError("memory database is not initialized")
 
-            ownership, ownership_params = adapter_sql("metadata")
-            cursor = await self.db_connection.execute(
-                f"SELECT COUNT(*) FROM documents WHERE {ownership}", ownership_params
-            )
-            row = await cursor.fetchone()
-            total_count = int(row[0]) if row and row[0] is not None else 0
-
-            stats = {}
-            stats["total_memories"] = total_count
-
-            # 初始化统计变量
-            session_counts: dict[str, int] = {}
-            status_breakdown = {"active": 0, "archived": 0, "deleted": 0}
-            importance_sum = 0
-            importance_count = 0
-            importance_distribution = {
-                "0-1": 0,
-                "1-2": 0,
-                "2-3": 0,
-                "3-4": 0,
-                "4-5": 0,
-                "5-6": 0,
-                "6-7": 0,
-                "7-8": 0,
-                "8-9": 0,
-                "9-10": 0,
-            }
-            bucket_keys = [
-                "0-1",
-                "1-2",
-                "2-3",
-                "3-4",
-                "4-5",
-                "5-6",
-                "6-7",
-                "7-8",
-                "8-9",
-                "9-10",
-            ]
-            oldest_time = None
-            newest_time = None
-
-            # 使用主键 keyset 分页流式读取，避免 OFFSET 分页的 O(N²) 开销。
-            batch_size = 500
+        async def active_memory_batches():
             last_id = 0
-
+            batch_size = 200
             while True:
                 cursor = await self.db_connection.execute(
-                    f"SELECT id, metadata FROM documents WHERE id > ? AND {ownership} ORDER BY id LIMIT ?",
-                    (last_id, *ownership_params, batch_size),
+                    """
+                    SELECT id, text, metadata
+                    FROM documents
+                    WHERE id > ?
+                      AND COALESCE(
+                          json_extract(metadata, '$.status'), 'active'
+                      ) = 'active'
+                    ORDER BY id
+                    LIMIT ?
+                    """,
+                    (last_id, batch_size),
+                )
+                rows = await cursor.fetchall()
+                if not rows:
+                    break
+
+                batch: list[tuple[int, str, dict[str, Any]]] = []
+                for row in rows:
+                    metadata = row["metadata"] or {}
+                    if isinstance(metadata, str):
+                        try:
+                            metadata = json.loads(metadata)
+                        except (json.JSONDecodeError, TypeError):
+                            metadata = {}
+                    elif not isinstance(metadata, dict):
+                        metadata = {}
+                    batch.append((int(row["id"]), str(row["text"] or ""), metadata))
+
+                last_id = int(rows[-1]["id"])
+                yield batch
+
+        self._invalidate_search_cache()
+        return await self.graph_memory_manager.rebuild_memory_batches(
+            active_memory_batches()
+        )
+
+    async def apply_daily_decay(self, decay_rate: float, days: int = 1) -> int:
+        """
+        批量应用重要性衰减
+
+        Args:
+            decay_rate: 每日衰减率 (0-1)
+            days: 衰减天数（用于补偿错过的天数）
+
+        Returns:
+            int: 受影响的记忆数量；数据库失败时异常交由调度器处理。
+        """
+        if decay_rate <= 0 or days <= 0:
+            return 0
+
+        try:
+            access_window_days = float(
+                self.config.get("access_decay_window_days", 30.0)
+            )
+            max_access_count = float(self.config.get("access_decay_max_count", 10.0))
+            access_decay_multiplier = float(
+                self.config.get("access_count_decay_multiplier", 0.5)
+            )
+            protected_threshold = clamp_float(
+                self.config.get("protected_importance_threshold"), default=0.6
+            )
+            access_window_start = time.time() - max(1.0, access_window_days) * 86400.0
+            decay_filter = (
+                "json_extract(metadata, '$.importance') IS NOT NULL "
+                "OR metadata LIKE '%\"importance\"%'"
+            )
+
+            def _compute_batch(rows: list[Any]) -> list[tuple[float, int]]:
+                updates: list[tuple[float, int]] = []
+                for row in rows:
+                    metadata = safe_json_dict(row["metadata"])
+                    importance = clamp_float(metadata.get("importance"), default=0.5)
+                    if importance >= protected_threshold:
+                        continue
+                    access_count = safe_float(metadata.get("access_count"), 0.0)
+                    last_access_time = safe_float(metadata.get("last_access_time"), 0.0)
+
+                    recent_access_factor = (
+                        1.0 if last_access_time >= access_window_start else 0.5
+                    )
+                    access_factor = min(1.0, access_count / max(1.0, max_access_count))
+                    effective_decay_rate = decay_rate * (
+                        1 - 0.5 * access_factor * recent_access_factor
+                    )
+                    decay_factor = (1 - effective_decay_rate) ** days
+                    updates.append((decay_factor, int(row["id"])))
+                return updates
+
+            # Keyset 分批读取，避免全表 fetchall 在 10 万级文档时占用上百 MB；
+            # 逐批解析后只保留 (factor, id)，最后仍用同一个写事务落库。
+            updates: list[tuple[float, int]] = []
+            batch_size = 500
+            last_id = 0
+            while True:
+                cursor = await self.db_connection.execute(
+                    "SELECT id, metadata FROM documents WHERE id > ? AND ("
+                    + decay_filter
+                    + ") ORDER BY id LIMIT ?",
+                    (last_id, batch_size),
                 )
                 rows = await cursor.fetchall()
                 if not rows:
                     break
                 last_id = int(rows[-1]["id"])
+                updates.extend(await asyncio.to_thread(_compute_batch, list(rows)))
 
-                # 通过线程池批量解析 metadata（避免大量 json.loads 阻塞事件循环）
-                raw_metadata = [r["metadata"] for r in rows]
-                parsed = await asyncio.to_thread(
-                    lambda: [safe_json_dict(m) for m in raw_metadata]
-                )
+            if not updates:
+                return 0
 
-                for metadata in parsed:
-                    # 统计会话（直接使用session_id分组）
-                    session_id = metadata.get("session_id")
-                    if session_id:
-                        session_counts[session_id] = (
-                            session_counts.get(session_id, 0) + 1
+            # 只改 importance / access_count 两个键，且新值在 SQL 里基于当前值计算：
+            # 并发召回写入的 last_access_time（以及期间新增的 access_count）不会被
+            # 旧快照整列回写覆盖。
+            async with self._write_transaction() as connection:
+                await connection.executemany(
+                    """
+                    UPDATE documents
+                    SET metadata = json_set(
+                        json_set(
+                            metadata,
+                            '$.importance',
+                            MAX(
+                                0.01,
+                                ROUND(
+                                    CAST(json_extract(metadata, '$.importance') AS REAL) * ?,
+                                    4
+                                )
+                            )
+                        ),
+                        '$.access_count',
+                        CAST(
+                            COALESCE(
+                                CAST(json_extract(metadata, '$.access_count') AS REAL),
+                                0
+                            ) * ?
+                            AS INTEGER
                         )
+                    )
+                    WHERE id = ?
+                    """,
+                    [
+                        (factor, access_decay_multiplier, doc_id)
+                        for factor, doc_id in updates
+                    ],
+                )
+            affected = len(updates)
 
-                    # 统计状态（默认 active）
-                    status = metadata.get("status", "active")
-                    if status in status_breakdown:
-                        status_breakdown[status] += 1
-                    else:
-                        # 未知状态默认计入 active
-                        status_breakdown["active"] += 1
-
-                    # 统计重要性
-                    importance = metadata.get("importance")
-                    if importance is not None:
-                        clamped = clamp_float(importance, default=0.5)
-                        importance_sum += clamped
-                        importance_count += 1
-                        # 分桶统计 (0-10 归一化)
-                        display_importance = clamped * 10 if clamped <= 1 else clamped
-                        bucket_idx = min(9, max(0, int(display_importance)))
-                        importance_distribution[bucket_keys[bucket_idx]] += 1
-
-                    # 统计时间
-                    create_time = metadata.get("create_time")
-                    if create_time:
-                        create_time = safe_float(create_time, 0.0)
-                        if oldest_time is None or create_time < oldest_time:
-                            oldest_time = create_time
-                        if newest_time is None or create_time > newest_time:
-                            newest_time = create_time
-
-            stats["sessions"] = session_counts
-            stats["status_breakdown"] = status_breakdown
-            stats["avg_importance"] = (
-                importance_sum / importance_count if importance_count > 0 else 0.0
+            logger.info(
+                f"[衰减] 批量衰减完成: 衰减率={decay_rate}, 天数={days}, "
+                f"访问窗口={access_window_days:.1f}天, 影响记录={affected}"
             )
-            stats["importance_distribution"] = importance_distribution
-            stats["oldest_memory"] = oldest_time
-            stats["newest_memory"] = newest_time
-            if self.graph_store is not None:
-                stats.update(await self.graph_store.get_memory_entry_stats())
-                stats["graph_memory_enabled"] = True
-            else:
-                stats["graph_memory_enabled"] = False
-            stats["index_maintenance"] = dict(self.index_maintenance_status)
 
-            return stats
+            self._invalidate_search_cache()
+            return affected
+
         except asyncio.CancelledError:
             raise
-        except Exception as e:
-            logger.error(f"获取统计信息失败: {e}", exc_info=True)
-            return {
-                "total_memories": 0,
-                "sessions": {},
-                "status_breakdown": {"active": 0, "archived": 0, "deleted": 0},
-                "avg_importance": 0.0,
-                "oldest_memory": None,
-                "newest_memory": None,
-                "graph_memory_enabled": bool(self.graph_store is not None),
-            }
 
-    async def get_consolidation_candidates(
-        self, max_importance: float, cutoff: float
-    ) -> list[dict[str, Any]]:
-        """
-        查询符合整合条件的候选记忆（活跃状态 + 低重要度 + 足够旧）。
+    async def _update_access_times_internal(
+        self, doc_ids: list[int], atom_ids=None
+    ) -> bool:
+        """合并同一时间窗口内的召回访问统计写。
+
+        访问时间/次数只用于衰减排序，短时间内合并写不会改变语义；真正落库由
+        `_flush_access_updates` 用单条原子 SQL 完成，避免每次召回都改写 k 行 metadata。
 
         Args:
-            max_importance: 重要性上限（低于该值的记忆参与整合）
-            cutoff: 创建时间上限（epoch 秒，早于该时间的记忆参与整合）
+            doc_ids: Document ids to bump.
+            atom_ids: Optional atom ids to bump.
 
         Returns:
-            List[Dict]: 候选列表，每项包含 id/content/metadata(已解析为 dict)
-
-        Raises:
-            RuntimeError: 数据库连接未初始化时抛出
+            bool: True if the ids were queued.
         """
         if self.db_connection is None:
-            raise RuntimeError("数据库连接未初始化")
-
-        ownership, ownership_params = adapter_sql("metadata")
-        cursor = await self.db_connection.execute(
-            f"""
-            SELECT id, text, metadata
-            FROM documents
-            WHERE {ownership} AND COALESCE(json_extract(metadata, '$.status'), 'active') = 'active'
-              AND CAST(COALESCE(json_extract(metadata, '$.importance'), '0.5') AS REAL) < ?
-              AND CAST(COALESCE(json_extract(metadata, '$.create_time'), '0') AS REAL) < ?
-            ORDER BY id
-            """,
-            (*ownership_params, max_importance, cutoff),
-        )
-        rows = await cursor.fetchall()
-
-        candidates: list[dict[str, Any]] = []
-        for row in rows:
-            candidates.append(
-                {
-                    "id": int(row["id"]),
-                    "content": row["text"],
-                    "metadata": safe_json_dict(row["metadata"]),
-                }
+            return False
+        self._access_update_pending.update(int(doc_id) for doc_id in doc_ids)
+        if atom_ids:
+            self._access_atom_update_pending.update(
+                int(atom_id) for atom_id in atom_ids
             )
-        return candidates
+        if not self._access_update_pending:
+            return False
+        if self._access_flush_task is None or self._access_flush_task.done():
+            self._access_flush_task = self._create_tracked_task(
+                self._deferred_flush_access_updates()
+            )
+        return True
 
-    async def get_consolidation_stats(self) -> dict[str, int]:
-        """
-        统计已整合与已归档的记忆数量（供管理页面展示）。
+    async def _deferred_flush_access_updates(self) -> None:
+        await asyncio.sleep(self._ACCESS_UPDATE_DEBOUNCE_SECONDS)
+        await self._flush_access_updates()
 
-        Returns:
-            Dict: 包含 consolidated_count 与 archived_count 的字典
+    async def _flush_access_updates(self) -> None:
+        """把挂起的访问统计写入数据库（失败时保留挂起项，下次重试）。"""
+        doc_ids = sorted(self._access_update_pending)
+        atom_ids = sorted(self._access_atom_update_pending)
+        if not doc_ids and not atom_ids:
+            return
+        written = await self._write_access_updates(doc_ids, atom_ids)
+        if written:
+            self._access_update_pending.difference_update(doc_ids)
+            self._access_atom_update_pending.difference_update(atom_ids)
 
-        Raises:
-            RuntimeError: 数据库连接未初始化时抛出
-        """
-        if self.db_connection is None:
-            raise RuntimeError("数据库连接未初始化")
+    async def _write_access_updates(
+        self, doc_ids: list[int], atom_ids: list[int]
+    ) -> bool:
+        """单条原子 SQL 批量递增访问时间与次数。"""
+        unique_ids = list(dict.fromkeys(int(doc_id) for doc_id in doc_ids))
+        if not unique_ids or self.db_connection is None:
+            return False
 
-        ownership, ownership_params = adapter_sql(
-            "CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END"
-        )
-        cursor = await self.db_connection.execute(
-            "SELECT COUNT(*) FROM documents WHERE json_valid(metadata) "
-            "AND json_array_length("
-            "COALESCE(json_extract(metadata, '$.consolidated_from'), '[]')"
-            ") > 0"
-            f" AND {ownership}",
-            ownership_params,
-        )
-        row = await cursor.fetchone()
-        consolidated_count = int(row[0]) if row else 0
-
-        cursor = await self.db_connection.execute(
-            "SELECT COUNT(*) FROM documents WHERE "
-            "COALESCE("
-            "CASE WHEN json_valid(metadata) "
-            "THEN json_extract(metadata, '$.status') END,"
-            "'active'"
-            ") = 'archived'"
-            f" AND {ownership}",
-            ownership_params,
-        )
-        row = await cursor.fetchone()
-        archived_count = int(row[0]) if row else 0
-
-        return {
-            "consolidated_count": consolidated_count,
-            "archived_count": archived_count,
-        }
-
-    async def maintain_storage(self, *, vacuum: bool = False) -> dict[str, Any]:
-        """Run SQLite storage maintenance and return size diagnostics."""
+        current_time = time.time()
         try:
-            db_path = Path(self.db_path)
-            wal_path = Path(f"{self.db_path}-wal")
-            before_size = db_path.stat().st_size if db_path.exists() else 0
-            before_wal_size = wal_path.stat().st_size if wal_path.exists() else 0
-
-            if self.db_connection is None:
-                return {
-                    "success": False,
-                    "error": "database connection is not initialized",
-                }
-
-            for fts_table in (
-                "livingmemory_memories_fts",
-                "livingmemory_graph_entries_fts",
-                "memory_atoms_fts",
-            ):
-                try:
-                    async with self._write_transaction() as connection:
-                        await connection.execute(
-                            f"INSERT INTO {fts_table}({fts_table}) VALUES ('optimize')"
+            # 单条原子 SQL，避免并发召回任务对同一记忆产生丢失更新
+            placeholders = ",".join("?" * len(unique_ids))
+            async with self._write_transaction() as connection:
+                cursor = await connection.execute(
+                    f"""
+                    UPDATE documents
+                    SET metadata = CASE
+                        WHEN json_valid(metadata) THEN json_set(
+                            json_set(metadata, '$.last_access_time', ?),
+                            '$.access_count',
+                            MIN(
+                                COALESCE(
+                                    CAST(json_extract(metadata, '$.access_count') AS INTEGER),
+                                    0
+                                ) + 1,
+                                1000000
+                            )
                         )
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    logger.debug(
-                        f"[StorageMaintenance] 跳过 FTS optimize: {fts_table}",
-                        exc_info=True,
+                        ELSE json_set('{{}}', '$.last_access_time', ?, '$.access_count', 1)
+                    END
+                    WHERE id IN ({placeholders})
+                    """,
+                    (current_time, current_time, *unique_ids),
+                )
+                if atom_ids and self.atom_store is not None:
+                    unique_atoms = list(
+                        dict.fromkeys(int(atom_id) for atom_id in atom_ids)
                     )
-
-            await self.db_connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-
-            if vacuum:
-                await self.db_connection.execute("VACUUM")
-
-            after_size = db_path.stat().st_size if db_path.exists() else 0
-            after_wal_size = wal_path.stat().st_size if wal_path.exists() else 0
-            return {
-                "success": True,
-                "vacuum": vacuum,
-                "db_size_before": before_size,
-                "db_size_after": after_size,
-                "wal_size_before": before_wal_size,
-                "wal_size_after": after_wal_size,
-                "bytes_reclaimed": max(
-                    0,
-                    before_size + before_wal_size - after_size - after_wal_size,
-                ),
-            }
+                    await connection.execute(
+                        f"UPDATE memory_atoms SET last_accessed_at = ? "
+                        f"WHERE id IN ({','.join('?' for _ in unique_atoms)}) "
+                        "AND status = 'active' AND expires_at > ?",
+                        (current_time, *unique_atoms, current_time),
+                    )
+            return cursor.rowcount > 0
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.error(f"[StorageMaintenance] 执行存储维护失败: {e}", exc_info=True)
-            return {"success": False, "error": str(e)}
+            # Access statistics are best effort; retain SQLite details for diagnosis.
+            logger.warning(
+                f"Failed to update memory access statistics "
+                f"(db_path={self.db_path}, "
+                f"sqlite_errorcode={getattr(e, 'sqlite_errorcode', None)}, "
+                f"sqlite_errorname={getattr(e, 'sqlite_errorname', None)}, "
+                f"doc_ids={unique_ids}): {e}",
+                exc_info=True,
+            )
+            return False

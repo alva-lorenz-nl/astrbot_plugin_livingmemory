@@ -1,30 +1,129 @@
-"""
-GraphStore 的 GraphStoreReadMixin 拆分模块
-自动从 storage/graph_store.py 拆分，保持行为不变
+"""GraphStore 的读取方法与图快照组装。
+
+宿主契约：``_connect`` / ``_read_connect`` 连接工厂与
+``_NODE_TOKEN_QUERY_BATCH_SIZE`` 批量常量由 ``GraphStore`` 提供。
 """
 
 from __future__ import annotations
 
+import math
+import re
 from typing import Any
-
-from ..core.memory_scope import adapter_sql
 
 import aiosqlite
 
 from astrbot.api import logger
 
+from ..core.memory_scope import adapter_sql, memory_scope_sql
 from ..core.utils.json_utils import safe_json_dict
+from ..core.utils.number_utils import safe_float
+
+# 扩展候选先按 3 倍 limit 取回，再按 hub 惩罚重排后截断；
+# 3 倍足以让低 degree 邻居/入口挤进前 limit，不会放大成全表扫描。
+_EXPANSION_OVERFETCH = 3
+
+# 1～2 个汉字走 bigram FTS；更长的词走 trigram 索引或 LIKE（含通配符时）。
+_SHORT_CJK_TOKEN = re.compile(r"^[一-鿿]{1,2}$")
 
 
 class GraphStoreReadMixin:
-    """GraphStore 拆分模块：GraphStoreReadMixin
+    """GraphStore 的读取方法与图快照组装。"""
 
-    宿主契约：``_connect`` 连接工厂与 ``_NODE_TOKEN_QUERY_BATCH_SIZE`` 批量
-    常量由 ``GraphStore``（storage/graph_store.py）提供，此处仅作类型声明。
-    """
-
-    # 宿主共享状态契约
+    # 宿主共享常量契约
     _NODE_TOKEN_QUERY_BATCH_SIZE: int
+
+    # initialize() 之后按需探测：只有宿主 documents 表存在时才过滤 archived 记忆；
+    # 独立图谱库（重建 shadow / 单元测试）没有该表，退化为不过滤。
+    _documents_table_available: bool = False
+
+    async def _documents_table_exists(self, db: aiosqlite.Connection) -> bool:
+        """Return whether the shared database carries the host ``documents`` table."""
+        if getattr(self, "_documents_table_available", False):
+            return True
+        cursor = await db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'documents' LIMIT 1"
+        )
+        self._documents_table_available = await cursor.fetchone() is not None
+        return self._documents_table_available
+
+    # Non-active sources in the host ``documents`` table. The expression must
+    # match `idx_doc_status` (storage/schema.py) literally, otherwise every
+    # graph-route query degrades into a full documents scan with per-row JSON
+    # parsing. NULL metadata has no status and stays recallable.
+    _NON_ACTIVE_DOCUMENTS_SQL: str = (
+        "SELECT id FROM documents "
+        "WHERE COALESCE(json_extract(metadata, '$.status'), 'active') <> 'active'"
+    )
+
+    async def _archived_memory_exclusion(
+        self, db: aiosqlite.Connection, column: str
+    ) -> str | None:
+        """Predicate excluding entries whose source memory is archived/deleted.
+
+        Uses an exclusion (not an inclusion) predicate on purpose: graph entries
+        whose source document is missing from ``documents`` (rebuild shadow rows,
+        fake/partial stores, half-written migrations) stay retrievable instead of
+        being silently dropped.
+
+        Args:
+            db: Open read connection used to probe the schema.
+            column: Column holding the source memory id (e.g. ``ge.source_memory_id``).
+
+        Returns:
+            ``"<column> NOT IN (SELECT ... non-active documents)"`` or ``None``
+            when the database has no host ``documents`` table.
+        """
+        if not await self._documents_table_exists(db):
+            return None
+        return f"{column} NOT IN ({self._NON_ACTIVE_DOCUMENTS_SQL})"
+
+    @staticmethod
+    def _hub_penalty(degree: int) -> float:
+        """Weight multiplier for a node with the given active-edge degree."""
+        return 1.0 / (1.0 + math.log1p(max(0, int(degree))))
+
+    async def _node_hub_factors(
+        self, db: aiosqlite.Connection, node_ids: list[int]
+    ) -> dict[int, float]:
+        """Return normalized ``1/(1+log1p(degree))`` factors for expansion nodes.
+
+        Degrees are computed from active edges so hub nodes (high degree) expand
+        with a lower weight than specific leaf nodes. Factors are normalized by
+        the maximum so the most specific node keeps weight 1.0 and results stay
+        in the same score range as before.
+
+        Args:
+            db: Open read connection.
+            node_ids: Nodes being expanded from.
+
+        Returns:
+            Mapping ``node_id -> factor`` in ``(0, 1]``; missing nodes mean degree 0.
+        """
+        unique_ids = sorted({int(node_id) for node_id in node_ids})
+        if not unique_ids:
+            return {}
+        placeholders = ",".join("?" * len(unique_ids))
+        cursor = await db.execute(
+            f"""
+            SELECT node_id, COUNT(*) AS degree
+            FROM (
+                SELECT source_node_id AS node_id FROM graph_edges
+                WHERE status = 'active' AND source_node_id IN ({placeholders})
+                UNION ALL
+                SELECT target_node_id AS node_id FROM graph_edges
+                WHERE status = 'active' AND target_node_id IN ({placeholders})
+            )
+            GROUP BY node_id
+            """,
+            (*unique_ids, *unique_ids),
+        )
+        degrees = {int(row[0]): int(row[1]) for row in await cursor.fetchall()}
+        raw = {
+            node_id: self._hub_penalty(degrees.get(node_id, 0))
+            for node_id in unique_ids
+        }
+        peak = max(raw.values(), default=1.0) or 1.0
+        return {node_id: value / peak for node_id, value in raw.items()}
 
     async def list_vector_doc_ids(self) -> list[int]:
         async with self._read_connect() as db:
@@ -106,9 +205,10 @@ class GraphStoreReadMixin:
         """Search graph entries through the FTS table."""
         filters: list[str] = []
         params: list[Any] = [fts_query]
-        if session_id is not None:
-            filters.append("ge.session_id = ?")
-            params.append(session_id)
+        scope_clause, scope_params = memory_scope_sql("ge.session_id", session_id)
+        if scope_clause:
+            filters.append(scope_clause)
+            params.extend(scope_params)
         if persona_id is not None:
             filters.append("ge.persona_id = ?")
             params.append(persona_id)
@@ -116,10 +216,14 @@ class GraphStoreReadMixin:
         filters.append(ownership)
         params.extend(ownership_params)
 
-        where_clause = f"AND {' AND '.join(filters)}" if filters else ""
-
         async with self._read_connect() as db:
             db.row_factory = aiosqlite.Row
+            archived_exclusion = await self._archived_memory_exclusion(
+                db, "ge.source_memory_id"
+            )
+            if archived_exclusion is not None:
+                filters.append(archived_exclusion)
+            where_clause = f"AND {' AND '.join(filters)}" if filters else ""
             try:
                 cursor = await db.execute(
                     f"""
@@ -170,55 +274,97 @@ class GraphStoreReadMixin:
     async def search_nodes_by_tokens(
         self, tokens: list[str], limit: int = 20
     ) -> list[dict[str, Any]]:
-        """Find graph nodes whose canonical values overlap query tokens."""
+        """Find graph nodes whose canonical values overlap query tokens.
+
+        归档过滤用相关 NOT EXISTS：只对命中的节点探测其入口，避免每次召回
+        都扫一遍全部 ``graph_entry_nodes``；库里没有归档记忆时整条子句省略。
+        """
         normalized_tokens = list(dict.fromkeys(str(token).strip() for token in tokens))
         normalized_tokens = [token for token in normalized_tokens if token]
         if not normalized_tokens:
             return []
 
         ownership, ownership_params = adapter_sql("ge.metadata")
-        node_filter = (
-            f"id IN (SELECT gen.node_id FROM graph_entry_nodes gen JOIN graph_entries ge ON ge.id=gen.entry_id WHERE {ownership})"
+        ownership_filter = (
+            "AND id IN (SELECT gen.node_id FROM graph_entry_nodes gen "
+            "JOIN graph_entries ge ON ge.id=gen.entry_id "
+            f"WHERE {ownership})"
             if ownership_params
-            else "1"
+            else ""
         )
         rows_by_id: dict[int, aiosqlite.Row] = {}
         async with self._read_connect() as db:
             db.row_factory = aiosqlite.Row
+            archived_filter = ""
+            if await self._documents_table_exists(db):
+                cursor = await db.execute(
+                    f"SELECT COUNT(*) FROM ({self._NON_ACTIVE_DOCUMENTS_SQL})"
+                )
+                if (await cursor.fetchone())[0]:
+                    archived_filter = f"""
+                    AND NOT EXISTS (
+                        SELECT 1 FROM graph_entry_nodes gen
+                        JOIN graph_entries ge ON ge.id = gen.entry_id
+                        WHERE gen.node_id = graph_nodes.id
+                          AND ge.source_memory_id IN (
+                              {self._NON_ACTIVE_DOCUMENTS_SQL}
+                          )
+                    )
+                    """
             for start in range(
                 0, len(normalized_tokens), self._NODE_TOKEN_QUERY_BATCH_SIZE
             ):
                 batch = normalized_tokens[
                     start : start + self._NODE_TOKEN_QUERY_BATCH_SIZE
                 ]
-                clauses = ["canonical_value LIKE ?" for _ in batch]
-                params = [f"%{token}%" for token in batch]
-                if getattr(self, "_node_fts_available", False):
-                    clauses = [
-                        "id IN (SELECT rowid FROM livingmemory_graph_nodes_fts WHERE canonical_value LIKE ?)"
-                        if len(token) >= 3 and "%" not in token and "_" not in token
-                        else "canonical_value LIKE ?"
-                        for token in batch
-                    ]
+                params: list[Any] = []
+                clauses: list[str] = []
+                short_tokens: list[str] = []
+                for token in batch:
+                    if _SHORT_CJK_TOKEN.match(token):
+                        short_tokens.append(token)
+                    elif (
+                        self._node_fts_available
+                        and len(token) >= 3
+                        and "%" not in token
+                        and "_" not in token
+                    ):
+                        clauses.append(
+                            "id IN (SELECT rowid FROM livingmemory_graph_nodes_fts "
+                            "WHERE canonical_value LIKE ?)"
+                        )
+                        params.append(f"%{token}%")
+                    else:
+                        clauses.append("canonical_value LIKE ?")
+                        params.append(f"%{token}%")
+                if short_tokens:
+                    clauses.append(
+                        "id IN (SELECT rowid FROM livingmemory_graph_nodes_bigram_fts "
+                        "WHERE livingmemory_graph_nodes_bigram_fts MATCH ?)"
+                    )
+                    params.append(
+                        " OR ".join(
+                            '"' + token.replace('"', '""') + '"'
+                            for token in short_tokens
+                        )
+                    )
                 cursor = await db.execute(
                     f"""
                     SELECT id, node_key, node_type, node_value, canonical_value, metadata
                     FROM graph_nodes
-                    WHERE ({" OR ".join(clauses)}) AND {node_filter}
-                    ORDER BY LENGTH(canonical_value) ASC
+                    WHERE ({" OR ".join(clauses)}) {ownership_filter} {archived_filter}
+                    ORDER BY LENGTH(canonical_value) ASC, id ASC
                     LIMIT ?
                     """,
                     (*params, *ownership_params, limit),
                 )
-                batch_rows = await cursor.fetchall()
-                for row in batch_rows:
+                for row in await cursor.fetchall():
                     rows_by_id.setdefault(int(row["id"]), row)
 
         rows = sorted(
             rows_by_id.values(),
             key=lambda row: (len(str(row["canonical_value"])), int(row["id"])),
         )[:limit]
-
         return [
             {
                 "id": int(row["id"]),
@@ -246,23 +392,32 @@ class GraphStoreReadMixin:
         filters: list[str] = []
         params: list[Any] = list(node_ids)
 
-        if session_id is not None:
-            filters.append("ge.session_id = ?")
-            params.append(session_id)
+        scope_clause, scope_params = memory_scope_sql("ge.session_id", session_id)
+        if scope_clause:
+            filters.append(scope_clause)
+            params.extend(scope_params)
         if persona_id is not None:
             filters.append("ge.persona_id = ?")
             params.append(persona_id)
         ownership, ownership_params = adapter_sql("ge.metadata")
         filters.append(ownership)
         params.extend(ownership_params)
-        where_clause = f"AND {' AND '.join(filters)}" if filters else ""
 
         async with self._read_connect() as db:
             db.row_factory = aiosqlite.Row
+            archived_exclusion = await self._archived_memory_exclusion(
+                db, "ge.source_memory_id"
+            )
+            if archived_exclusion is not None:
+                filters.append(archived_exclusion)
+            where_clause = f"AND {' AND '.join(filters)}" if filters else ""
+            factors = await self._node_hub_factors(db, node_ids)
             cursor = await db.execute(
                 f"""
                 SELECT ge.id, ge.source_memory_id, ge.content, ge.metadata,
-                       ge.entry_type, ge.relation_type, COUNT(DISTINCT gen.node_id) AS hit_count
+                       ge.entry_type, ge.relation_type,
+                       COUNT(DISTINCT gen.node_id) AS hit_count,
+                       GROUP_CONCAT(DISTINCT gen.node_id) AS linked_node_ids
                 FROM graph_entry_nodes gen
                 JOIN graph_entries ge ON ge.id = gen.entry_id
                 WHERE gen.node_id IN ({placeholders}) {where_clause}
@@ -270,13 +425,25 @@ class GraphStoreReadMixin:
                 ORDER BY hit_count DESC, ge.id DESC
                 LIMIT ?
                 """,
-                (*params, limit),
+                (*params, max(1, limit) * _EXPANSION_OVERFETCH),
             )
             rows = await cursor.fetchall()
 
         hits: list[dict[str, Any]] = []
         for row in rows:
             metadata = safe_json_dict(row["metadata"])
+            linked_node_ids = [
+                int(value)
+                for value in str(row["linked_node_ids"] or "").split(",")
+                if value
+            ]
+            # 从低 degree 节点扩展出来的入口权重更高；hub 节点命中多但信息泛，
+            # 用最大因子（最具体的那条路径）避免多路径命中被过度惩罚。
+            penalty = max(
+                (factors.get(node_id, 1.0) for node_id in linked_node_ids),
+                default=1.0,
+            )
+            base_score = min(1.0, 0.35 + 0.15 * int(row["hit_count"]))
             hits.append(
                 {
                     "entry_id": int(row["id"]),
@@ -285,11 +452,13 @@ class GraphStoreReadMixin:
                     "metadata": metadata,
                     "entry_type": row["entry_type"],
                     "relation_type": row["relation_type"],
-                    "score": min(1.0, 0.35 + 0.15 * int(row["hit_count"])),
+                    "score": min(1.0, base_score * penalty),
                     "hit_count": int(row["hit_count"]),
+                    "hub_penalty": round(penalty, 4),
                 }
             )
-        return hits
+        hits.sort(key=lambda hit: (hit["score"], hit["entry_id"]), reverse=True)
+        return hits[: max(1, limit)]
 
     async def get_neighbor_node_ids(
         self,
@@ -336,12 +505,22 @@ class GraphStoreReadMixin:
                     *normalized_ids,
                     *ownership_params,
                     *normalized_ids,
-                    limit,
+                    max(1, limit) * _EXPANSION_OVERFETCH,
                 ),
             )
             rows = await cursor.fetchall()
+            factors = await self._node_hub_factors(db, [int(row[0]) for row in rows])
 
-        return [int(row[0]) for row in rows]
+        # 按“边权 × hub 惩罚”重排：邻居本身是 hub 时扩展噪声大，
+        # 让更具体的邻居优先进入 limit，避免 24 条扩展名额被 hub 占满。
+        ranked = sorted(
+            (
+                (float(row[1] or 0.0) * factors.get(int(row[0]), 1.0), int(row[0]))
+                for row in rows
+            ),
+            key=lambda item: (-item[0], item[1]),
+        )
+        return [neighbor_id for _, neighbor_id in ranked[: max(1, limit)]]
 
     async def get_memory_entry_stats(self) -> dict[str, int]:
         """Return graph storage counts for status reporting."""
@@ -366,9 +545,11 @@ class GraphStoreReadMixin:
                         ownership_params,
                     )
                 ).fetchone()
-            return dict(
-                graph_nodes=nodes[0], graph_edges=edges[0], graph_entries=entries[0]
-            )
+            return {
+                "graph_nodes": nodes[0],
+                "graph_edges": edges[0],
+                "graph_entries": entries[0],
+            }
         async with self._read_connect() as db:
             node_cursor = await db.execute("SELECT COUNT(*) FROM graph_nodes")
             edge_cursor = await db.execute("SELECT COUNT(*) FROM graph_edges")
@@ -381,3 +562,617 @@ class GraphStoreReadMixin:
             "graph_edges": int(edge_count_row[0]) if edge_count_row else 0,
             "graph_entries": int(entry_count_row[0]) if entry_count_row else 0,
         }
+
+    # ==================== 图快照 ====================
+
+    async def get_subgraph_for_memories(
+        self,
+        memory_ids: list[int],
+        limit_entries: int = 36,
+        limit_nodes: int = 48,
+        limit_edges: int = 72,
+    ) -> dict[str, Any]:
+        """Return a compact graph snapshot for the provided memory identifiers."""
+        normalized_memory_ids = self._normalize_snapshot_ids(memory_ids)
+        if not normalized_memory_ids:
+            return {"nodes": [], "edges": [], "entries": [], "memories": []}
+
+        limit_entries = max(1, min(limit_entries, 400))
+        limit_nodes = max(1, min(limit_nodes, 200))
+        limit_edges = max(1, min(limit_edges, 400))
+
+        entry_rows, node_rows, edge_rows = await self._read_snapshot_rows(
+            normalized_memory_ids, limit_entries, limit_edges
+        )
+        if not entry_rows:
+            return {"nodes": [], "edges": [], "entries": [], "memories": []}
+
+        node_map, entries, edges, memory_base = self._build_snapshot_graph(
+            node_rows, entry_rows, edge_rows
+        )
+        node_map, entries, edges, nodes_were_limited = self._limit_snapshot_nodes(
+            node_map, entries, edges, limit_nodes
+        )
+        memories = self._build_snapshot_memories(
+            memory_base, entries, edges, nodes_were_limited
+        )
+
+        nodes = sorted(
+            node_map.values(),
+            key=lambda item: (
+                -safe_float(item.get("weight"), 0.0),
+                -int(item.get("entry_count", 0)),
+                -int(item.get("degree", 0)),
+                str(item.get("label", "")),
+            ),
+        )
+        memories.sort(
+            key=lambda item: (
+                -int(item.get("entry_count", 0)),
+                -int(item.get("node_count", 0)),
+                -int(item.get("edge_count", 0)),
+                -safe_float(item.get("importance"), 0.0),
+            )
+        )
+
+        return {
+            "nodes": nodes,
+            "edges": edges,
+            "entries": entries,
+            "memories": memories,
+        }
+
+    @staticmethod
+    def _normalize_snapshot_ids(memory_ids: list[int]) -> list[int]:
+        """去重并转成整数，非法 ID 直接跳过。"""
+        normalized_memory_ids: list[int] = []
+        seen_memory_ids: set[int] = set()
+        for memory_id in memory_ids:
+            try:
+                normalized = int(memory_id)
+            except (TypeError, ValueError):
+                continue
+            if normalized in seen_memory_ids:
+                continue
+            seen_memory_ids.add(normalized)
+            normalized_memory_ids.append(normalized)
+        return normalized_memory_ids
+
+    async def _read_snapshot_rows(
+        self,
+        normalized_memory_ids: list[int],
+        limit_entries: int,
+        limit_edges: int,
+    ) -> tuple[list[aiosqlite.Row], list[aiosqlite.Row], list[aiosqlite.Row]]:
+        """一次连接内读取 entry / node / edge 三批快照行。"""
+        ownership, ownership_params = adapter_sql("metadata")
+        memory_placeholders = ",".join("?" * len(normalized_memory_ids))
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            entry_cursor = await db.execute(
+                f"""
+                SELECT id, source_memory_id, session_id, persona_id,
+                       entry_type, relation_type, content, metadata, edge_id
+                FROM graph_entries
+                WHERE source_memory_id IN ({memory_placeholders}) AND {ownership}
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (*normalized_memory_ids, *ownership_params, limit_entries),
+            )
+            entry_rows = await entry_cursor.fetchall()
+
+            if not entry_rows:
+                return [], [], []
+
+            entry_ids = [int(row["id"]) for row in entry_rows]
+            entry_placeholders = ",".join("?" * len(entry_ids))
+            node_cursor = await db.execute(
+                f"""
+                SELECT gen.entry_id,
+                       gn.id AS node_id,
+                       gn.node_key,
+                       gn.node_type,
+                       gn.node_value,
+                       gn.canonical_value,
+                       gn.metadata
+                FROM graph_entry_nodes gen
+                JOIN graph_nodes gn ON gn.id = gen.node_id
+                WHERE gen.entry_id IN ({entry_placeholders})
+                ORDER BY gn.id ASC
+                """,
+                tuple(entry_ids),
+            )
+            node_rows = await node_cursor.fetchall()
+
+            node_ids = sorted({int(row["node_id"]) for row in node_rows})
+            edge_rows: list[aiosqlite.Row] = []
+            if node_ids:
+                node_placeholders = ",".join("?" * len(node_ids))
+                edge_cursor = await db.execute(
+                    f"""
+                    SELECT id, edge_key, source_node_id, target_node_id,
+                           relation_type, source_memory_id, weight,
+                           confidence, status, metadata
+                    FROM graph_edges
+                    WHERE source_memory_id IN ({memory_placeholders})
+                      AND source_node_id IN ({node_placeholders})
+                      AND target_node_id IN ({node_placeholders})
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (
+                        *normalized_memory_ids,
+                        *node_ids,
+                        *node_ids,
+                        limit_edges,
+                    ),
+                )
+                edge_rows = await edge_cursor.fetchall()
+
+        return entry_rows, node_rows, edge_rows
+
+    @staticmethod
+    def _build_snapshot_graph(
+        node_rows: list[aiosqlite.Row],
+        entry_rows: list[aiosqlite.Row],
+        edge_rows: list[aiosqlite.Row],
+    ) -> tuple[
+        dict[int, dict[str, Any]],
+        list[dict[str, Any]],
+        list[dict[str, Any]],
+        dict[int, dict[str, Any]],
+    ]:
+        """把快照行组装成节点/条目/边和按记忆聚合的基础视图。"""
+        entry_node_map: dict[int, list[int]] = {}
+        node_map: dict[int, dict[str, Any]] = {}
+        memory_base: dict[int, dict[str, Any]] = {}
+
+        for row in node_rows:
+            entry_id = int(row["entry_id"])
+            node_id = int(row["node_id"])
+            entry_node_map.setdefault(entry_id, []).append(node_id)
+            if node_id not in node_map:
+                node_map[node_id] = {
+                    "id": node_id,
+                    "key": row["node_key"],
+                    "type": row["node_type"],
+                    "label": row["node_value"],
+                    "canonical_value": row["canonical_value"],
+                    "metadata": safe_json_dict(row["metadata"]),
+                    "entry_count": 0,
+                    "memory_count": 0,
+                    "degree": 0,
+                    "weight": 0.0,
+                    "_memory_ids": set(),
+                }
+
+        entries: list[dict[str, Any]] = []
+        for row in entry_rows:
+            entry_id = int(row["id"])
+            memory_id = int(row["source_memory_id"])
+            metadata = safe_json_dict(row["metadata"])
+            node_ids_for_entry = list(dict.fromkeys(entry_node_map.get(entry_id, [])))
+
+            entries.append(
+                {
+                    "id": entry_id,
+                    "memory_id": memory_id,
+                    "entry_type": row["entry_type"],
+                    "relation_type": row["relation_type"],
+                    "content": row["content"],
+                    "metadata": metadata,
+                    "session_id": row["session_id"],
+                    "persona_id": row["persona_id"],
+                    "edge_id": int(row["edge_id"]) if row["edge_id"] else None,
+                    "node_ids": node_ids_for_entry,
+                }
+            )
+
+            base = memory_base.setdefault(
+                memory_id,
+                {
+                    "memory_id": memory_id,
+                    "summary": metadata.get("canonical_summary") or row["content"],
+                    "session_id": metadata.get("session_id") or row["session_id"],
+                    "persona_id": metadata.get("persona_id") or row["persona_id"],
+                    "importance": safe_float(metadata.get("importance"), 0.0),
+                    "entry_count": 0,
+                    "edge_count": 0,
+                    "node_ids": set(),
+                    "entry_types": set(),
+                },
+            )
+            base["entry_count"] += 1
+            base["entry_types"].add(row["entry_type"])
+            base["node_ids"].update(node_ids_for_entry)
+
+            for node_id in node_ids_for_entry:
+                node = node_map.get(node_id)
+                if node is None:
+                    continue
+                node["entry_count"] += 1
+                node["_memory_ids"].add(memory_id)
+
+        edges: list[dict[str, Any]] = []
+        for row in edge_rows:
+            source_node_id = int(row["source_node_id"])
+            target_node_id = int(row["target_node_id"])
+            edge = {
+                "id": int(row["id"]),
+                "key": row["edge_key"],
+                "source": source_node_id,
+                "target": target_node_id,
+                "relation_type": row["relation_type"],
+                "memory_id": int(row["source_memory_id"]),
+                "weight": float(row["weight"]),
+                "confidence": float(row["confidence"]),
+                "status": row["status"],
+                "metadata": safe_json_dict(row["metadata"]),
+            }
+            edges.append(edge)
+
+            if source_node_id in node_map:
+                node_map[source_node_id]["degree"] += 1
+            if target_node_id in node_map:
+                node_map[target_node_id]["degree"] += 1
+            if edge["memory_id"] in memory_base:
+                memory_base[edge["memory_id"]]["edge_count"] += 1
+
+        for node in node_map.values():
+            memory_ids_for_node = node.pop("_memory_ids", set())
+            node["memory_count"] = len(memory_ids_for_node)
+            node["weight"] = round(
+                node["entry_count"]
+                + node["memory_count"] * 0.75
+                + node["degree"] * 0.35,
+                4,
+            )
+
+        return node_map, entries, edges, memory_base
+
+    @staticmethod
+    def _limit_snapshot_nodes(
+        node_map: dict[int, dict[str, Any]],
+        entries: list[dict[str, Any]],
+        edges: list[dict[str, Any]],
+        limit_nodes: int,
+    ) -> tuple[
+        dict[int, dict[str, Any]],
+        list[dict[str, Any]],
+        list[dict[str, Any]],
+        bool,
+    ]:
+        """节点数超限时按权重截断，并同步裁掉条目与边。"""
+        nodes_were_limited = len(node_map) > limit_nodes
+        if not nodes_were_limited:
+            return node_map, entries, edges, False
+
+        ranked_nodes = sorted(
+            node_map.values(),
+            key=lambda item: (
+                -safe_float(item.get("weight"), 0.0),
+                -int(item.get("entry_count", 0)),
+                -int(item.get("degree", 0)),
+                str(item.get("label", "")),
+            ),
+        )
+        allowed_node_ids = {node["id"] for node in ranked_nodes[:limit_nodes]}
+        node_map = {
+            node_id: node
+            for node_id, node in node_map.items()
+            if node_id in allowed_node_ids
+        }
+        edges = [
+            edge
+            for edge in edges
+            if edge["source"] in allowed_node_ids and edge["target"] in allowed_node_ids
+        ]
+        filtered_entries: list[dict[str, Any]] = []
+        for entry in entries:
+            entry["node_ids"] = [
+                node_id for node_id in entry["node_ids"] if node_id in allowed_node_ids
+            ]
+            if entry["node_ids"] or entry["entry_type"] == "summary":
+                filtered_entries.append(entry)
+        return node_map, filtered_entries, edges, True
+
+    @staticmethod
+    def _build_snapshot_memories(
+        memory_base: dict[int, dict[str, Any]],
+        entries: list[dict[str, Any]],
+        edges: list[dict[str, Any]],
+        nodes_were_limited: bool,
+    ) -> list[dict[str, Any]]:
+        """按（可选的）截断后条目/边重建记忆视图。"""
+        memory_view: dict[int, dict[str, Any]] = {}
+        for memory_id, base in memory_base.items():
+            memory_view[memory_id] = {
+                "memory_id": memory_id,
+                "summary": base["summary"],
+                "session_id": base["session_id"],
+                "persona_id": base["persona_id"],
+                "importance": base["importance"],
+                "entry_count": base["entry_count"],
+                "edge_count": base["edge_count"],
+                "node_ids": set(base["node_ids"]),
+                "entry_types": set(base["entry_types"]),
+            }
+
+        if nodes_were_limited:
+            filtered_memory_map = {
+                memory_id: {
+                    **base,
+                    "entry_count": 0,
+                    "edge_count": 0,
+                    "node_ids": set(),
+                    "entry_types": set(),
+                }
+                for memory_id, base in memory_view.items()
+            }
+            for entry in entries:
+                memory = filtered_memory_map.get(entry["memory_id"])
+                if memory is None:
+                    continue
+                memory["entry_count"] += 1
+                memory["node_ids"].update(entry["node_ids"])
+                memory["entry_types"].add(entry["entry_type"])
+            for edge in edges:
+                memory = filtered_memory_map.get(edge["memory_id"])
+                if memory is not None:
+                    memory["edge_count"] += 1
+        else:
+            filtered_memory_map = memory_view
+
+        memories: list[dict[str, Any]] = []
+        for memory in filtered_memory_map.values():
+            if memory["entry_count"] == 0 and memory["edge_count"] == 0:
+                continue
+            node_ids_for_memory = memory.pop("node_ids")
+            entry_types = memory.pop("entry_types")
+            memory["node_count"] = len(node_ids_for_memory)
+            memory["entry_types"] = sorted(entry_types)
+            memories.append(memory)
+        return memories
+
+    async def get_graph_snapshot(
+        self,
+        session_id: str | None = None,
+        persona_id: str | None = None,
+        limit_memories: int = 12,
+        limit_entries: int = 36,
+        limit_nodes: int = 48,
+        limit_edges: int = 72,
+    ) -> dict[str, Any]:
+        """Return a recent graph snapshot for overview screens."""
+        memory_ids = await self.get_recent_memory_ids(
+            limit=limit_memories,
+            session_id=session_id,
+            persona_id=persona_id,
+        )
+        return await self.get_subgraph_for_memories(
+            memory_ids,
+            limit_entries=limit_entries,
+            limit_nodes=limit_nodes,
+            limit_edges=limit_edges,
+        )
+
+    async def get_full_graph_snapshot(
+        self,
+        session_id: str | None = None,
+        persona_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Return the scoped graph and memory-node associations in full.
+
+        The full-graph view is intentionally complete: archived and superseded
+        memories and their relations stay in the graph so the dashboard can
+        render the whole history (only deleted relations and out-of-scope
+        entries are excluded).
+
+        Args:
+            session_id: Optional session scope.
+            persona_id: Optional persona scope.
+
+        Returns:
+            Nodes, relations and memories with their associated node IDs.
+        """
+        filters: list[str] = []
+        params: list[Any] = []
+        if session_id is not None:
+            filters.append("ge.session_id = ?")
+            params.append(session_id)
+        if persona_id is not None:
+            filters.append("ge.persona_id = ?")
+            params.append(persona_id)
+        ownership, ownership_params = adapter_sql("ge.metadata")
+        filters.append(ownership)
+        params.extend(ownership_params)
+
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            entry_where = f"WHERE {' AND '.join(filters)}"
+            edge_conditions = [
+                "EXISTS (SELECT 1 FROM graph_entries ge "
+                "WHERE ge.source_memory_id = edge.source_memory_id "
+                f"AND {' AND '.join(filters)})",
+                "edge.status IN ('active', 'archived')",
+            ]
+            edge_where = " AND ".join(edge_conditions)
+
+            node_cursor = await db.execute(
+                f"""
+                SELECT gn.id, gn.node_key, gn.node_type, gn.node_value,
+                       gn.canonical_value, gn.metadata,
+                       COUNT(ge.id) AS entry_count,
+                       GROUP_CONCAT(DISTINCT ge.source_memory_id) AS memory_ids
+                FROM graph_nodes gn
+                JOIN graph_entry_nodes gen ON gen.node_id = gn.id
+                JOIN graph_entries ge ON ge.id = gen.entry_id
+                {entry_where}
+                GROUP BY gn.id
+                ORDER BY COUNT(ge.id) DESC, gn.id ASC
+                """,
+                tuple(params),
+            )
+            node_rows = await node_cursor.fetchall()
+
+            edge_cursor = await db.execute(
+                f"""
+                SELECT edge.id, edge.source_node_id, edge.target_node_id,
+                       edge.relation_type, edge.source_memory_id, edge.weight,
+                       edge.confidence
+                FROM graph_edges edge
+                WHERE {edge_where}
+                ORDER BY edge.weight DESC, edge.id ASC
+                """,
+                tuple(params),
+            )
+            edge_rows = await edge_cursor.fetchall()
+
+            memory_cursor = await db.execute(
+                f"""
+                SELECT ge.source_memory_id, ge.session_id, ge.persona_id,
+                       ge.content, ge.metadata
+                FROM graph_entries ge
+                JOIN (
+                    SELECT ge.source_memory_id, MAX(ge.id) AS latest_entry_id
+                    FROM graph_entries ge
+                    {entry_where}
+                    GROUP BY ge.source_memory_id
+                ) latest ON latest.latest_entry_id = ge.id
+                ORDER BY ge.source_memory_id ASC
+                """,
+                tuple(params),
+            )
+            memory_rows = await memory_cursor.fetchall()
+
+        node_map: dict[int, dict[str, Any]] = {}
+        memory_node_ids: dict[int, list[int]] = {}
+        for row in node_rows:
+            node_id = int(row["id"])
+            memory_ids = row["memory_ids"].split(",")
+            node_map[node_id] = {
+                "id": node_id,
+                "key": row["node_key"],
+                "type": row["node_type"],
+                "label": row["node_value"],
+                "canonical_value": row["canonical_value"],
+                "metadata": safe_json_dict(row["metadata"]),
+                "entry_count": int(row["entry_count"] or 0),
+                "memory_count": len(memory_ids),
+                "degree": 0,
+                "weight": 0.0,
+            }
+            for memory_id in memory_ids:
+                memory_node_ids.setdefault(int(memory_id), []).append(node_id)
+
+        edges: list[dict[str, Any]] = []
+        for row in edge_rows:
+            source = int(row["source_node_id"])
+            target = int(row["target_node_id"])
+            if source not in node_map or target not in node_map:
+                continue
+            edges.append(
+                {
+                    "id": int(row["id"]),
+                    "source": source,
+                    "target": target,
+                    "relation_type": row["relation_type"],
+                    "memory_id": int(row["source_memory_id"]),
+                    "weight": float(row["weight"]),
+                    "confidence": float(row["confidence"]),
+                }
+            )
+            node_map[source]["degree"] += 1
+            node_map[target]["degree"] += 1
+
+        for node in node_map.values():
+            node["weight"] = round(
+                node["entry_count"]
+                + node["memory_count"] * 0.75
+                + node["degree"] * 0.35,
+                4,
+            )
+
+        referenced_memory_ids = set(memory_node_ids)
+        referenced_memory_ids.update(edge["memory_id"] for edge in edges)
+        memories: list[dict[str, Any]] = []
+        for row in memory_rows:
+            memory_id = int(row["source_memory_id"])
+            if memory_id not in referenced_memory_ids:
+                continue
+            metadata = safe_json_dict(row["metadata"])
+            summary = str(metadata.get("canonical_summary") or row["content"] or "")[
+                :500
+            ]
+            memories.append(
+                {
+                    "memory_id": memory_id,
+                    "summary": summary,
+                    "session_id": metadata.get("session_id") or row["session_id"],
+                    "persona_id": metadata.get("persona_id") or row["persona_id"],
+                    "importance": safe_float(metadata.get("importance"), 0.0),
+                    "node_ids": sorted(
+                        node_id
+                        for node_id in memory_node_ids.get(memory_id, [])
+                        if node_id in node_map
+                    ),
+                }
+            )
+
+        nodes = sorted(
+            node_map.values(),
+            key=lambda item: (
+                -safe_float(item.get("weight"), 0.0),
+                -int(item.get("degree", 0)),
+                str(item.get("label", "")),
+            ),
+        )
+        return {
+            "nodes": nodes,
+            "edges": edges,
+            "entries": [],
+            "memories": memories,
+        }
+
+    # ==================== 最近记忆 ====================
+
+    async def get_recent_memory_ids(
+        self,
+        limit: int = 12,
+        session_id: str | None = None,
+        persona_id: str | None = None,
+    ) -> list[int]:
+        """Return recently updated memory identifiers represented in the graph."""
+        limit = max(1, min(limit, 200))
+        filters: list[str] = []
+        params: list[Any] = []
+
+        if session_id is not None:
+            filters.append("session_id = ?")
+            params.append(session_id)
+        if persona_id is not None:
+            filters.append("persona_id = ?")
+            params.append(persona_id)
+        ownership, ownership_params = adapter_sql("metadata")
+        filters.append(ownership)
+        params.extend(ownership_params)
+
+        where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
+
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                f"""
+                SELECT source_memory_id, MAX(id) AS latest_entry_id
+                FROM graph_entries
+                {where_clause}
+                GROUP BY source_memory_id
+                ORDER BY latest_entry_id DESC
+                LIMIT ?
+                """,
+                (*params, limit),
+            )
+            rows = await cursor.fetchall()
+
+        return [int(row["source_memory_id"]) for row in rows]

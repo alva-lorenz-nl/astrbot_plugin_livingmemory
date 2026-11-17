@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -56,21 +57,28 @@ class DualRouteRetriever:
         doc_diagnostics: dict[str, Any] = {}
         graph_diagnostics: dict[str, Any] = {}
         # 旧调用不增加下游关键字参数，保留宿主和已有替身的调用契约。
-        doc_options = {"diagnostics": doc_diagnostics} if diagnostics is not None else {}
-        graph_options = {"diagnostics": graph_diagnostics} if diagnostics is not None else {}
+        doc_options = (
+            {"diagnostics": doc_diagnostics} if diagnostics is not None else {}
+        )
+        graph_options = (
+            {"diagnostics": graph_diagnostics} if diagnostics is not None else {}
+        )
         if relevance_only:
             doc_options["relevance_only"] = True
             graph_options["relevance_only"] = True
         try:
-            (doc_results, doc_error), (graph_results, graph_error) = await asyncio.gather(
-                search_route(
+            (
+                (doc_results, doc_error, doc_ms),
+                (graph_results, graph_error, graph_ms),
+            ) = await asyncio.gather(
+                self._timed_route(
                     "document",
                     self.document_retriever.search(
                         query, max(k * 2, k), session_id, persona_id, **doc_options
                     ),
                     timeout,
                 ),
-                search_route(
+                self._timed_route(
                     "graph",
                     self.graph_retriever.search(
                         query, max(k * 2, k), session_id, persona_id, **graph_options
@@ -78,8 +86,20 @@ class DualRouteRetriever:
                     timeout,
                 ),
             )
-            merge_route(diagnostics, "document", doc_diagnostics, doc_error)
-            merge_route(diagnostics, "graph", graph_diagnostics, graph_error)
+            merge_route(
+                diagnostics,
+                "document",
+                doc_diagnostics,
+                doc_error,
+                details={"candidates": len(doc_results), "ms": doc_ms},
+            )
+            merge_route(
+                diagnostics,
+                "graph",
+                graph_diagnostics,
+                graph_error,
+                details={"candidates": len(graph_results), "ms": graph_ms},
+            )
         finally:
             if token is not None:
                 query_embeddings.reset(token)
@@ -93,8 +113,6 @@ class DualRouteRetriever:
             if diagnostics is not None and len(doc_results) > k:
                 diagnostics["candidate_limited"] = True
             return doc_results[:k]
-        if not doc_results and not graph_results:
-            return []
 
         document_weight, graph_weight, intent = self._route_weights_for_query(query)
 
@@ -228,10 +246,101 @@ class DualRouteRetriever:
                 )
             )
 
-        merged_results.sort(key=lambda item: item.final_score, reverse=True)
+        merged_results.sort(
+            key=lambda item: (item.final_score, -item.doc_id), reverse=True
+        )
+        final_results = self._apply_graph_presence_floor(
+            merged_results,
+            doc_map=doc_map,
+            graph_map=graph_map,
+            k=k,
+            diagnostics=diagnostics,
+        )
         if diagnostics is not None and len(merged_results) > k:
             diagnostics["candidate_limited"] = True
-        return merged_results[:k]
+        return final_results
+
+    # 图路权重上限是 graph_route_weight（默认 0.35），文档路任一条
+    # signal > 0.65 即可压过所有 graph-only 结果；k>=5 时保底保留图路配额。
+    _GRAPH_PRESENCE_MIN_K = 5
+
+    def _apply_graph_presence_floor(
+        self,
+        merged_results: list[HybridResult],
+        *,
+        doc_map: dict[int, HybridResult],
+        graph_map: dict[int, Any],
+        k: int,
+        diagnostics: dict[str, Any] | None,
+    ) -> list[HybridResult]:
+        """Keep a floor of graph-exclusive results in the fused top-k.
+
+        Document-route signals are normalized by the document-route maximum, so a
+        single document hit with signal above ``1 - graph_weight`` outranks every
+        graph-only hit (graph route max contributes at most ``graph_weight``).
+        When ``k >= 5`` at least ``max(1, k // 5)`` graph-exclusive docs are kept
+        by replacing fused tail entries: the head keeps its fused order, injected
+        results stay at the tail in their own score order.
+
+        Args:
+            merged_results: Fused results sorted by final score (descending).
+            doc_map: Document-route results keyed by doc id.
+            graph_map: Graph-route results keyed by doc id.
+            k: Number of results the caller asked for.
+            diagnostics: Optional per-request diagnostics dict.
+
+        Returns:
+            The fused list trimmed to ``k`` results with the graph floor applied.
+        """
+        if k < self._GRAPH_PRESENCE_MIN_K:
+            return merged_results[:k]
+        graph_only_ids = {doc_id for doc_id in graph_map if doc_id not in doc_map}
+        if not graph_only_ids:
+            return merged_results[:k]
+
+        budget = max(1, k // 5)
+        head = merged_results[: max(0, k - budget)]
+        head_ids = {result.doc_id for result in head}
+        kept_graph_only = sum(1 for result in head if result.doc_id in graph_only_ids)
+        missing = budget - kept_graph_only
+        if missing <= 0:
+            return merged_results[:k]
+
+        injected = [
+            result
+            for result in merged_results
+            if result.doc_id in graph_only_ids and result.doc_id not in head_ids
+        ][:missing]
+        if not injected:
+            return merged_results[:k]
+
+        final = head + injected
+        if len(final) < k:
+            used = {result.doc_id for result in final}
+            final.extend(
+                result for result in merged_results if result.doc_id not in used
+            )
+            final = final[:k]
+        if diagnostics is not None:
+            diagnostics["graph_presence_injected"] = len(injected)
+            if len(merged_results) > k:
+                diagnostics["candidate_limited"] = True
+        return final
+
+    async def _timed_route(self, name: str, awaitable, timeout: float):
+        """Run one route through ``search_route`` and measure its latency.
+
+        Args:
+            name: Route name used in diagnostics.
+            awaitable: Coroutine performing the route search.
+            timeout: Route timeout in seconds.
+
+        Returns:
+            ``(results, error, elapsed_ms)``.
+        """
+        started = time.perf_counter()
+        results, error = await search_route(name, awaitable, timeout)
+        return results, error, (time.perf_counter() - started) * 1000.0
 
     def _route_weights_for_query(self, query: str) -> tuple[float, float, str]:
         """Adjust document/graph weights with lightweight query intent rules."""

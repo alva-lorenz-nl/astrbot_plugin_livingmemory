@@ -3,7 +3,6 @@
 
   /* 共享常量与工具（见 graph-shared.js） */
   var CFG = GraphShared.CFG;
-  var TYPE_COLORS = GraphShared.TYPE_COLORS;
   var clamp = GraphShared.clamp;
   var lerp = GraphShared.lerp;
   var easeInOutCubic = GraphShared.easeInOutCubic;
@@ -79,7 +78,7 @@
     this._lastPositions = {};
     this._lastSimPositions = {};
     try {
-      this._worker = new Worker("./graph-layout-worker.js?protocol=2");
+      this._worker = new Worker("./assets/graph-layout-worker.min.js?protocol=2");
       this.isWorker = true;
       var self = this;
       this._worker.onmessage = function(e) { self._onMessage(e.data); };
@@ -301,10 +300,9 @@
     nodes.forEach(function(n) { self._nodeMap[n.id] = n; });
     this.renderer._nodesMap = this._nodeMap;
     var tier = this.renderer.configureData(nodes, edges);
-    var reduceMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    this._ambientMotion = tier === 0 && !reduceMotion &&
+    this._ambientMotion = tier === 0 &&
       nodes.length <= CFG.AMBIENT_NODE_LIMIT && edges.length <= CFG.AMBIENT_EDGE_LIMIT;
-    this._instantLayout = tier >= 2 || reduceMotion;
+    this._instantLayout = tier >= 2;
   };
 
   Animator.prototype.layoutGraph = function(centerId) {
@@ -650,10 +648,10 @@
     /* Theme observer */
     if (typeof window.MutationObserver === "function") {
       this._themeObserver = new MutationObserver(function() {
-        self.renderer._bgCacheKey = null;
+        self.renderer.refreshTheme();
         self.animator.wake();
       });
-      this._themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme", "data-style"] });
+      this._themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme", "data-style", "data-graph-view"] });
     }
 
     this._initialized = true;
@@ -695,7 +693,6 @@
           Number(node.memory_count || 0) * 3 +
           Number(node.entry_count || 0) +
           Number(node.weight || 0),
-        color: TYPE_COLORS[node.type] || TYPE_COLORS.other,
       });
     });
 
@@ -714,7 +711,6 @@
         memory_id: Number(edge.memory_id || 0),
         weight: Number(edge.weight || 1),
         confidence: Number(edge.confidence || 0.8),
-        __color: relationColor(edge.relation_type),
         _bendSign: bendSeed % 2 ? 1 : -1,
       });
     });
@@ -815,6 +811,10 @@
     this.animator.setPageVisible(false);
     this.animator._layoutGeneration++;
     this.animator._onLayoutDone = null;
+    /* 布局缓存按图身份保存位置/社区数据；离开视图后不再需要，随 Worker 一起释放。 */
+    this.animator._layoutCache = {};
+    this.animator._layoutCacheOrder = [];
+    this.animator._lastLayoutSignature = null;
     if (this.animator._layout.destroy) this.animator._layout.destroy();
     this.interaction.destroy();
     if (this._resizeObserver) this._resizeObserver.disconnect();
@@ -826,26 +826,6 @@
     }
     this._initialized = false;
   };
-
-  Graph2D.prototype.getDiagnostics = function() {
-    return {
-      performanceTier: this.renderer ? this.renderer.performanceTier : 0,
-      sourceNodes: this._nodes ? this._nodes.length : 0,
-      sourceEdges: this._edges ? this._edges.length : 0,
-      renderedNodes: this.renderer ? this.renderer._drawnNodes.length : 0,
-      renderedEdges: this.renderer ? this.renderer._drawnEdges.length : 0,
-      structuralEdges: this.renderer ? this.renderer._structuralEdges.length : 0,
-      communityBundles: this.renderer ? this.renderer._communityBundles.length : 0,
-      animatorRunning: Boolean(this.animator && this.animator._running),
-      ambientMotion: Boolean(this.animator && this.animator._ambientMotion),
-    };
-  };
-
-  function relationColor(type) {
-    var palette = ["#2a9e96", "#c58c2a", "#df6d62", "#78a94b", "#74868a"];
-    var h = String(type || "related").split("").reduce(function(a, c) { return a * 31 + c.charCodeAt(0); }, 7);
-    return palette[Math.abs(h) % palette.length];
-  }
 
   /* ═══════════════════════════════════════════════════════════════
      Export

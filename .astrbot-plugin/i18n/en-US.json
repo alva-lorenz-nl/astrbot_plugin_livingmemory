@@ -48,6 +48,14 @@
         "description": "LLM Model ID",
         "hint": "The large language model ID used for summarizing conversations and evaluating memory importance. Leave blank to use AstrBot default. A model with strong reasoning capabilities is recommended."
       },
+      "llm_fallback_provider_ids": {
+        "description": "Fallback LLM Providers",
+        "hint": "Provider IDs to try in order when the primary LLM fails (JSON array, e.g. [\"openai_gpt-4o\",\"gemini-2.5-pro\"]). Switches on timeout, rate limit (429), 5xx or authentication failures; parsing/format errors do not switch. Leave empty to disable fallback."
+      },
+      "llm_call_timeout_seconds": {
+        "description": "LLM Call Timeout (seconds)",
+        "hint": "Timeout for a single call to each provider. On timeout the provider is treated as unavailable and the next one is tried. Allowed range: 5-600."
+      },
       "llm_stream_mode": {
         "description": "Use Streaming Calls",
         "hint": "How memory processing calls the LLM. auto (default): try non-streaming first and switch to streaming automatically when the provider reports that non-stream requests are unsupported; always: always stream (for providers that only accept stream=true); never: always non-streaming (previous behavior).",
@@ -107,11 +115,11 @@
       },
       "min_similarity_for_retrieval": {
         "description": "Minimum Vector Similarity",
-        "hint": "Filter vector candidates below this similarity. Keyword-only matches remain eligible. Range: 0-1; 0 disables the filter."
+        "hint": "Filter vector candidates below this similarity. Keyword-only matches remain eligible. Default 0.45; set to 0 to disable the filter."
       },
       "recent_memory_count": {
         "description": "Reserved Recent Memories",
-        "hint": "Reserve this many recall slots for recent memories in the current scope. Set to 0 to disable. Allowed range: 0-20."
+        "hint": "Only fill remaining slots with recent memories in the current scope when relevant results are fewer than the requested count. Fixed slots are no longer reserved. Default 0 (disabled)."
       },
       "recent_memory_max_age_hours": {
         "description": "Recent Memory Window (hours)",
@@ -163,14 +171,9 @@
       },
       "injection_method": {
         "description": "Memory Injection Position",
-        "hint": "Where to inject memories into LLM requests. extra_user_content is the only supported mode: memories are appended to the current user message as a mark_as_temp temporary part that AstrBot filters out when saving history, so injection never touches conversation history or the prefix cache. user_message_before / user_message_after / fake_tool_call / fake_tool_call_deepseek_v4 / system_prompt are all deprecated (they rewrite the user message or write messages into conversation history) and automatically fall back to extra_user_content.",
+        "hint": "Memories are appended to the current user message as a mark_as_temp temporary part that AstrBot filters out when saving history, so injection never touches conversation history or the prefix cache.",
         "labels": [
-          "Extra User Content",
-          "Before User Message (deprecated)",
-          "After User Message (deprecated)",
-          "Fake Tool Call (deprecated)",
-          "Fake Tool Call (DeepSeek V4, deprecated)",
-          "System Prompt (deprecated)"
+          "Extra User Content"
         ]
       },
       "auto_remove_injected": {
@@ -196,6 +199,14 @@
       "search_cache_max_size": {
         "description": "Max Search Cache Entries",
         "hint": "Maximum number of retrieval results kept in memory. When the limit is exceeded, the least recently used entries are evicted. Allowed range: 0-10000."
+      },
+      "tokenizer": {
+        "description": "Chinese Tokenizer",
+        "hint": "jieba: word-level segmentation with better recall; reserves ~55 MB after first use. builtin: built-in single-character/ASCII tokens, never imports jieba and saves memory. Run /lmem rebuild-index after switching.",
+        "labels": [
+          "jieba word segmentation",
+          "Built-in tokenizer (low memory)"
+        ]
       }
     },
     "importance_decay": {
@@ -203,7 +214,7 @@
       "hint": "Gradually reduce the importance of old memories over time to prevent outdated information from retaining high weight indefinitely",
       "decay_rate": {
         "description": "Daily Decay Rate",
-        "hint": "The proportion of memory importance decayed per day. 0.01 means a 1% decrease daily. Set to 0 to disable decay. Allowed range: 0-1."
+        "hint": "Proportion of memory importance decayed per day. Default 0.005 means a 0.5% decrease daily; access reduces the effective decay rate. Set to 0 to disable decay. Allowed range: 0-1."
       },
       "access_decay_window_days": {
         "description": "Access Reinforcement Window (days)",
@@ -219,7 +230,7 @@
       },
       "protected_importance_threshold": {
         "description": "Protected Importance Threshold",
-        "hint": "Memories at or above this importance do not participate in daily importance decay. Allowed range: 0-1."
+        "hint": "Memories at or above this importance do not participate in daily importance decay. Default 0.6 protects memories at 60%+ importance. Allowed range: 0-1."
       }
     },
     "fusion_strategy": {
@@ -283,6 +294,10 @@
         "description": "Source Retention Importance Threshold",
         "hint": "Store original messages separately when summary importance reaches this value, enabling verification, detailed Agent recall, and re-summarization. Range 0-1; 1 keeps only maximum-importance memories."
       },
+      "max_segments_per_run": {
+        "description": "Max reflection segments per run",
+        "hint": "Maximum number of day/idle-split segments summarized in one trigger. Remaining backlog is consumed on the next trigger. (Allowed range: 1–50)"
+      },
       "max_messages_per_segment": {
         "description": "Messages per summary segment"
       }
@@ -325,6 +340,10 @@
       "agentic_recall_max_result_chars": {
         "description": "Max chars per agentic tool result",
         "hint": "Maximum characters a Beta memory tool returns in one call; longer content can be read via pagination. Suggested 4000-30000. (Allowed: 500-100000)"
+      },
+      "enable_profile_tool": {
+        "description": "Enable user profile tool",
+        "hint": "Register update_user_profile so the agent can write the user profile proactively; writes use the same evidence/confidence rules and record history. Off by default."
       }
     },
     "graph_memory": {
@@ -391,6 +410,26 @@
         "hint": "How many days after removal from retrieval indexes a forgotten atom is physically deleted from the database to reclaim storage. Allowed range: 1-365."
       }
     },
+    "channel_memory": {
+      "description": "Group channel memory",
+      "hint": "When enabled, group summaries are stored in a shared channel scope so any member of the group can recall them; recall searches the current scope and the channel scope together within one top_k budget. Disabled keeps the previous behavior.",
+      "enabled": {
+        "description": "Enable channel memory",
+        "hint": "Group summaries are stored under livingmemory:channel:<platform>:<group id>; personal memories (private summaries and explicit writes) keep their own scopes."
+      },
+      "min_user_slots": {
+        "description": "Minimum personal slots",
+        "hint": "Personal/session results kept at minimum during merged recall; channel results fill any gap. (Allowed: 0-5)"
+      },
+      "min_channel_slots": {
+        "description": "Minimum channel slots",
+        "hint": "Channel results kept at minimum during merged recall; personal results fill any gap. (Allowed: 0-5)"
+      },
+      "include_archived": {
+        "description": "Include archived memories in channel recall",
+        "hint": "Off by default: archived memories stay excluded. When on, only channel-scope results relax the status filter."
+      }
+    },
     "migration_settings": {
       "description": "Database Migration",
       "hint": "Control database version upgrade behavior on plugin startup",
@@ -441,34 +480,34 @@
     },
     "backup_settings": {
       "description": "Periodic Backup",
-      "hint": "Automatically back up the memory database daily to prevent accidental data loss",
+      "hint": "Create daily memory backups and prune daily backups past retention plus stale version backups so the data directory cannot grow without bound",
       "enabled": {
         "description": "Enable Daily Auto Backup",
         "hint": "Automatically back up the database after daily decay tasks. Recommended to keep enabled."
       },
       "keep_days": {
         "description": "Backup Retention Days",
-        "hint": "Backup files older than this number of days will be automatically deleted. Default is 7 days. Allowed range: 1-365."
+        "hint": "Retention days for daily and version backups. Version backups additionally keep only the 2 most recent ones, and total backup size is pruned from the oldest when it exceeds 512 MB. Default 7 days. Allowed range: 1-365."
       }
     },
     "forgetting_agent": {
       "description": "Auto Cleanup Settings",
-      "hint": "Periodically clean up old memories that are both outdated and low importance to control memory store size",
+      "hint": "Archive (by default, instead of deleting) aged low-importance memories to keep the memory store and indexes bounded",
       "auto_cleanup_enabled": {
         "description": "Enable Daily Auto Cleanup",
         "hint": "Automatically clean up eligible old memories after daily importance decay."
       },
       "auto_archived_enabled": {
         "description": "Archive Instead of Delete",
-        "hint": "Move cleanup candidates out of retrieval indexes while retaining restorable archived documents."
+        "hint": "Enabled by default: cleanup candidates are removed from retrieval indexes and kept as restorable archived documents. Disable to delete them instead."
       },
       "cleanup_days_threshold": {
         "description": "Cleanup Age Threshold (days)",
-        "hint": "Memories older than this many days become cleanup candidates. They will only be deleted if their importance is also below the threshold. Allowed range: 1-3650."
+        "hint": "Memories older than this many days become cleanup candidates. Default 120 days; they are processed only if importance is also below the threshold. Allowed range: 1-3650."
       },
       "cleanup_importance_threshold": {
         "description": "Cleanup Importance Threshold",
-        "hint": "Only memories with importance below this value will be cleaned up. 0.3 means memories below 30% importance. Allowed range: 0-1."
+        "hint": "Only memories with importance below this value are cleaned up. Default 0.25 means memories below 25% importance. Allowed range: 0-1."
       }
     },
     "memory_consolidation": {
@@ -545,6 +584,94 @@
       "max_source_messages": {
         "description": "Source message cap",
         "hint": "Maximum number of source messages kept on a merged memory."
+      }
+    },
+    "profile_settings": {
+      "description": "User profile",
+      "hint": "Maintain a structured, versioned user profile per memory scope + persona. Updated incrementally during summaries and injected as a fixed short block on recall. Enabled by default; no extra LLM calls.",
+      "enabled": {
+        "description": "Enable user profile",
+        "hint": "Merge summary output into the user profile and inject the profile block on every recall; disable to stop all profile reads/writes."
+      },
+      "max_chars": {
+        "description": "Profile injection budget (chars)",
+        "hint": "Maximum characters for the injected profile text, independent of the memory injection budget. Larger values keep more detail but consume more context. (50–2000)"
+      },
+      "min_confidence": {
+        "description": "Minimum confidence",
+        "hint": "Profile updates only apply directly when confidence reaches this value and evidence is valid; otherwise they become pending candidates. (0–1)"
+      },
+      "history_limit": {
+        "description": "History version limit",
+        "hint": "Number of history versions kept per profile; oldest versions are trimmed without deleting the current profile. (1–200)"
+      },
+      "max_pending": {
+        "description": "Pending candidate limit",
+        "hint": "Low-confidence or evidence-less updates go to the pending list; oldest candidates are dropped beyond this limit. (1–500)"
+      }
+    },
+    "trace_settings": {
+      "description": "Recall tracing",
+      "hint": "Record explainable traces of every memory recall (candidates, routes, rejection reasons, final injection) to debug why a memory was or was not recalled. In-memory ring buffer only; disk persistence is opt-in and query text is not stored by default.",
+      "enabled": {
+        "description": "Enable recall tracing",
+        "hint": "When disabled the recall path records nothing and behaves exactly as before."
+      },
+      "max_records": {
+        "description": "In-memory records",
+        "hint": "Number of recent traces kept in the in-process ring buffer; 0 disables the buffer. Oldest records are overwritten."
+      },
+      "persist_enabled": {
+        "description": "Persist as JSONL",
+        "hint": "Append one JSON object per line to recall_traces/YYYYMMDD.jsonl in the data directory. Disabled by default to avoid continuous disk writes."
+      },
+      "include_query_text": {
+        "description": "Store raw query text",
+        "hint": "By default only a query hash is stored; enabling this includes the user's raw query in traces, so enable it with privacy in mind."
+      },
+      "max_file_mb": {
+        "description": "Per-day file limit",
+        "hint": "New traces stop being appended to a JSONL file once it reaches this size."
+      },
+      "retention_days": {
+        "description": "Retention days",
+        "hint": "JSONL trace files older than this are cleaned up on the next write."
+      }
+    },
+    "external_api": {
+      "description": "External memory API",
+      "hint": "Let external agent terminals read and write memories with API keys (disabled by default). Create keys with /lmem apikey or the dashboard, then use the bundled MCP bridge.",
+      "enabled": {
+        "description": "Enable external memory API",
+        "hint": "Starts a dedicated HTTP listener (default 127.0.0.1:7801) serving /page/external. When disabled every external endpoint returns 404. Reload the plugin after changing."
+      },
+      "listen_host": {
+        "description": "Listen address",
+        "hint": "Bind address for the external API. Keep loopback 127.0.0.1 and let a reverse proxy expose it, if needed."
+      },
+      "listen_port": {
+        "description": "Listen port",
+        "hint": "Port for the external API listener, default 7801. Reload the plugin after changing."
+      },
+      "max_request_bytes": {
+        "description": "Max request body bytes",
+        "hint": "Largest accepted request body, default 262144 (256 KiB); larger requests return 400."
+      },
+      "default_rate_limit_per_min": {
+        "description": "Default requests per minute",
+        "hint": "Default per-key request budget for new keys; can be overridden per key."
+      },
+      "default_write_limit_per_min": {
+        "description": "Default writes per minute",
+        "hint": "Default per-key write budget for new keys. Read requests do not consume it."
+      },
+      "audit_retention_days": {
+        "description": "Audit retention days",
+        "hint": "Audit JSONL lives in the plugin data directory (external_api_audit.jsonl) and is trimmed to this many days, default 30."
+      },
+      "trust_proxy_headers": {
+        "description": "Trust proxy headers",
+        "hint": "Use X-Forwarded-For as the audit client address. Enable only behind a trusted reverse proxy."
       }
     }
   },

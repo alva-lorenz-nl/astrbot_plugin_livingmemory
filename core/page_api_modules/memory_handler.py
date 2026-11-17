@@ -2,7 +2,6 @@
 记忆管理处理模块
 """
 
-import inspect
 from typing import TYPE_CHECKING, Any
 
 from quart import request
@@ -10,14 +9,31 @@ from quart import request
 from astrbot.api import logger
 
 from ..memory_source import restore_source_messages
-from .memory_handler_update import MemoryHandlerUpdateMixin
 from .memory_handler_io import MemoryHandlerIoMixin
+from .memory_handler_update import MemoryHandlerUpdateMixin
 
 if TYPE_CHECKING:
     from .utils import PageApiUtils
 
+
 class MemoryHandler(MemoryHandlerUpdateMixin, MemoryHandlerIoMixin):
     """记忆管理处理器"""
+
+    # 列表页只渲染摘要与少量元数据；完整正文/元数据由详情接口返回。
+    LIST_SUMMARY_MAX_CHARS = 280
+    LIST_METADATA_KEYS = (
+        "memory_type",
+        "importance",
+        "status",
+        "create_time",
+        "updated_at",
+        "memory_origin",
+        "summary_quality",
+        "session_id",
+        "persona_id",
+        "scope_kind",
+        "channel_id",
+    )
 
     def __init__(self, utils: "PageApiUtils"):
         """
@@ -98,6 +114,8 @@ class MemoryHandler(MemoryHandlerUpdateMixin, MemoryHandlerIoMixin):
         type_filter = self.utils.optional_text(query.get("type"))
         if type_filter and type_filter.lower() == "all":
             type_filter = None
+        scope_filter = self.utils.optional_text(query.get("scope"))
+        channel_filter = self.utils.optional_text(query.get("channel_id"))
         sort_key = str(query.get("sort", "created_desc")).strip().lower()
 
         try:
@@ -112,6 +130,8 @@ class MemoryHandler(MemoryHandlerUpdateMixin, MemoryHandlerIoMixin):
                 keyword=keyword,
                 status=status_filter,
                 memory_type=type_filter,
+                scope=scope_filter,
+                channel_id=channel_filter,
                 sort_key=sort_key,
                 page=page,
                 page_size=page_size,
@@ -122,14 +142,34 @@ class MemoryHandler(MemoryHandlerUpdateMixin, MemoryHandlerIoMixin):
 
         items: list[dict[str, Any]] = []
         for row in page_data["items"]:
+            metadata = self.utils.normalize_metadata(row["metadata"])
+            summary = str(
+                metadata.get("persona_summary")
+                or metadata.get("canonical_summary")
+                or row["text"]
+                or ""
+            )
+            if len(summary) > self.LIST_SUMMARY_MAX_CHARS:
+                summary = summary[: self.LIST_SUMMARY_MAX_CHARS] + "…"
+            consolidated_from = metadata.get("consolidated_from")
             items.append(
                 {
                     "id": row["id"],
                     "doc_id": row["doc_id"],
-                    "text": row["text"],
-                    "metadata": self.utils.normalize_metadata(row["metadata"]),
+                    "summary": summary,
                     "created_at": row["created_at"],
                     "updated_at": row["updated_at"],
+                    "consolidated_count": (
+                        len(consolidated_from)
+                        if isinstance(consolidated_from, list)
+                        else 0
+                    ),
+                    # 列表只回 UI 需要的元数据；正文走详情接口，避免分页响应膨胀。
+                    "metadata": {
+                        key: metadata[key]
+                        for key in self.LIST_METADATA_KEYS
+                        if key in metadata
+                    },
                 }
             )
 
@@ -142,6 +182,8 @@ class MemoryHandler(MemoryHandlerUpdateMixin, MemoryHandlerIoMixin):
                 "has_more": page_data["has_more"],
                 "filters": {
                     "session_id": session_id,
+                    "scope": scope_filter,
+                    "channel_id": channel_filter,
                     "keyword": keyword,
                     "status": status_filter,
                     "type": type_filter,
@@ -175,11 +217,7 @@ class MemoryHandler(MemoryHandlerUpdateMixin, MemoryHandlerIoMixin):
         metadata = self.utils.normalize_metadata(memory.get("metadata"))
 
         # 构建完整的详情数据
-        get_source = getattr(memory_engine, "get_memory_source", None)
-        source_result = get_source(memory_id) if callable(get_source) else []
-        source_messages = (
-            await source_result if inspect.isawaitable(source_result) else []
-        )
+        source_messages = await memory_engine.get_memory_source(memory_id)
         detail = {
             "memory_id": memory.get("id"),
             "doc_id": memory.get("doc_id"),
@@ -243,9 +281,7 @@ class MemoryHandler(MemoryHandlerUpdateMixin, MemoryHandlerIoMixin):
         memory = await memory_engine.get_memory_record(memory_id)
         if not memory:
             return self.utils.error("记忆不存在")
-        get_source = getattr(memory_engine, "get_memory_source", None)
-        source_result = get_source(memory_id) if callable(get_source) else []
-        source = await source_result if inspect.isawaitable(source_result) else []
+        source = await memory_engine.get_memory_source(memory_id)
         if len(source) < 2:
             return self.utils.error("该记忆没有可重新总结的完整原文")
 
@@ -281,4 +317,3 @@ class MemoryHandler(MemoryHandlerUpdateMixin, MemoryHandlerIoMixin):
                 "new_memory_id": new_memory_id,
             }
         )
-

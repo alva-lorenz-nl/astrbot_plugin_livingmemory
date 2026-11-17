@@ -33,21 +33,43 @@
 
     /* ---- Appearance ---- */
     "header.theme": {"zh": "外观与主题", "en": "Appearance", "ru": "Оформление"},
-    "appearance.hint": {"zh": "选择即刻生效；偏好保存在当前浏览器。", "en": "Changes apply immediately and are saved in this browser.", "ru": "Изменения применяются сразу и сохраняются в этом браузере."},
+    "appearance.macos": {"zh": "macOS 26 · 液态玻璃", "en": "macOS 26", "ru": "macOS 26"},
+    "appearance.tabTheme": {"zh": "主题", "en": "Theme", "ru": "Тема"},
+    "appearance.tabAdvanced": {"zh": "高级", "en": "Advanced", "ru": "Расширенно"},
+    "appearance.accent": {"zh": "强调色", "en": "Accent color", "ru": "Акцентный цвет"},
+    "appearance.accentCustom": {"zh": "自定义颜色", "en": "Custom color", "ru": "Свой цвет"},
+    "appearance.wallpaper": {"zh": "壁纸", "en": "Wallpaper", "ru": "Обои"},
+    "appearance.upload": {"zh": "图片", "en": "Image", "ru": "Картинка"},
+    "appearance.wp.aurora": {"zh": "极光", "en": "Aurora", "ru": "Аврора"},
+    "appearance.wp.dusk": {"zh": "黄昏", "en": "Dusk", "ru": "Закат"},
+    "appearance.wp.forest": {"zh": "森林", "en": "Forest", "ru": "Лес"},
+    "appearance.wp.graphite": {"zh": "石墨", "en": "Graphite", "ru": "Графит"},
+    "appearance.wp.none": {"zh": "无", "en": "None", "ru": "Нет"},
+    "appearance.wp.image": {"zh": "自定义图片", "en": "Custom image", "ru": "Своя картинка"},
+    "appearance.glass": {"zh": "玻璃强度", "en": "Glass", "ru": "Стекло"},
+    "appearance.radius": {"zh": "圆角", "en": "Corners", "ru": "Углы"},
+    "appearance.density": {"zh": "密度", "en": "Density", "ru": "Плотность"},
+    "appearance.font": {"zh": "字体", "en": "Font", "ru": "Шрифт"},
+    "appearance.optDefault": {"zh": "默认", "en": "Default", "ru": "По умолчанию"},
+    "appearance.optSharp": {"zh": "直角", "en": "Sharp", "ru": "Острые"},
+    "appearance.optRound": {"zh": "圆润", "en": "Round", "ru": "Круглые"},
+    "appearance.optCompact": {"zh": "紧凑", "en": "Compact", "ru": "Компактно"},
+    "appearance.optSpacious": {"zh": "宽松", "en": "Spacious", "ru": "Свободно"},
+    "appearance.optSerif": {"zh": "衬线", "en": "Serif", "ru": "С засечками"},
+    "appearance.optMono": {"zh": "等宽", "en": "Mono", "ru": "Моно"},
+    "appearance.css": {"zh": "自定义 CSS", "en": "Custom CSS", "ru": "Свой CSS"},
+    "appearance.export": {"zh": "导出", "en": "Export", "ru": "Экспорт"},
+    "appearance.import": {"zh": "导入", "en": "Import", "ru": "Импорт"},
+    "appearance.reset": {"zh": "恢复默认", "en": "Reset", "ru": "Сбросить"},
+    "appearance.importFailed": {"zh": "不是有效的主题文件", "en": "Not a valid theme file", "ru": "Некорректный файл темы"},
     "appearance.style": {"zh": "视觉风格", "en": "Visual style", "ru": "Визуальный стиль"},
     "appearance.mode": {"zh": "明暗模式", "en": "Color mode", "ru": "Цветовой режим"},
     "appearance.system": {"zh": "自动", "en": "Auto", "ru": "Авто"},
     "appearance.light": {"zh": "浅色", "en": "Light", "ru": "Светлый"},
     "appearance.dark": {"zh": "深色", "en": "Dark", "ru": "Тёмный"},
-    "appearance.systemHint": {"zh": "自动模式跟随 AstrBot；独立打开时跟随设备。", "en": "Auto follows AstrBot, or your device when opened independently.", "ru": "Авто следует теме AstrBot, а при отдельном открытии — теме устройства."},
-    "appearance.editorial": {"zh": "Editorial · 原野", "en": "Editorial", "ru": "Editorial"},
-    "appearance.editorialDesc": {"zh": "经典网格 · 醒目标题 · 利落线条", "en": "Classic grid, bold headlines, crisp lines", "ru": "Классическая сетка, крупные заголовки, чёткие линии"},
     "appearance.studio": {"zh": "Studio · 轻盈", "en": "Studio", "ru": "Studio"},
-    "appearance.studioDesc": {"zh": "柔和圆角 · 蓝紫色调 · 悬浮卡片", "en": "Soft corners, indigo accents, floating cards", "ru": "Скругления, индиго, парящие карточки"},
     "appearance.paper": {"zh": "Paper · 书页", "en": "Paper", "ru": "Paper"},
-    "appearance.paperDesc": {"zh": "暖纸色调 · 衬线标题 · 阅读留白", "en": "Warm paper, serif headings, room to read", "ru": "Тёплая бумага, заголовки с засечками, простор"},
     "appearance.terminal": {"zh": "Terminal · 终端", "en": "Terminal", "ru": "Terminal"},
-    "appearance.terminalDesc": {"zh": "等宽字体 · 硬朗边框 · 仪表布局", "en": "Monospace type, sharp borders, instrument panels", "ru": "Моноширинный шрифт, строгие рамки, приборные панели"},
 
     /* ---- Workflow feedback ---- */
     "flow.resetFilters": {"zh": "重置筛选", "en": "Reset filters", "ru": "Сбросить фильтры"},
@@ -77,13 +99,14 @@
 
     /* ---- Navigation ---- */
     "nav.memory":         { zh: "记忆管理", en: "Memory", ru: "Память" },
+    "nav.menu": {"zh": "菜单", "en": "Menu", "ru": "Меню"},
     "nav.graph":          { zh: "知识图谱", en: "Knowledge Graph", ru: "Граф знаний" },
     "nav.system":         { zh: "系统概览", en: "System", ru: "Система" },
     "nav.recall":         { zh: "召回测试", en: "Recall Test", ru: "Тест поиска" },
     "nav.prompts":        { zh: "提示词管理", en: "Prompts", ru: "Промпты" },
     "nav.settings":       { zh: "设置", en: "Settings", ru: "Настройки" },
-    "settings.lead":      { zh: "高级配置", en: "Advanced settings", ru: "Расширенные настройки" },
-    "settings.reloadHint": { zh: "高级配置集中在插件页面，保存后请重载插件使全部组件生效。", en: "Advanced settings live here instead of the AstrBot plugin config page. Reload the plugin after saving so every component picks them up.", ru: "Расширенные настройки находятся на этой странице; после сохранения перезагрузите плагин." },
+    "nav.profile":        { zh: "用户档案", en: "Profiles", ru: "Профили" },
+    "nav.diagnostics":    { zh: "诊断", en: "Diagnostics", ru: "Диагностика" },
     "settings.save":      { zh: "保存设置", en: "Save", ru: "Сохранить" },
     "settings.adapterUnassigned": {"zh":"未归属","en":"Unassigned","ru":"Не назначено"},
     "settings.adapterOwnership": {"zh": "记忆归属", "en": "Memory ownership", "ru": "Принадлежность старой памяти"},
@@ -96,13 +119,21 @@
     "settings.loadFailed": { zh: "加载配置失败", en: "Failed to load settings", ru: "Не удалось загрузить настройки" },
     "settings.empty":     { zh: "暂无可配置项", en: "No settings available", ru: "Нет доступных настроек" },
     "settings.invalidValue": { zh: "配置项 {0} 的值无效", en: "Invalid value for {0}", ru: "Недопустимое значение для {0}" },
+    "settings.defaultValue": { zh: "默认值", en: "Default", ru: "По умолчанию" },
+    "settings.restoreDefault": { zh: "恢复默认", en: "Restore default", ru: "Сбросить" },
+    "settings.reloadRequired": { zh: "需重载插件", en: "Reload required", ru: "Нужна перезагрузка" },
+    "settings.dangerTitle": { zh: "确认保存危险配置？", en: "Save risky settings?", ru: "Сохранить опасные настройки?" },
+    "settings.dangerKeepOriginal": { zh: "记忆整合会直接删除被合并的旧记忆，无法恢复。", en: "Consolidation will delete merged source memories; this cannot be undone.", ru: "Интеграция удалит исходные памяти без возможности восстановления." },
+    "settings.dangerAutoCleanup": { zh: "自动清理会永久删除久远且低重要性的记忆。", en: "Auto-cleanup permanently deletes old, low-importance memories.", ru: "Автоочистка навсегда удалит старые малозначимые памяти." },
+    "settings.dangerGraphOff": { zh: "关闭图记忆会停用图谱检索与图谱视图。", en: "Disabling graph memory turns off graph retrieval and the graph view.", ru: "Отключение графа памяти отключит графовый поиск и просмотр графа." },
+    "settings.saveCancelled": { zh: "已取消保存", en: "Save cancelled", ru: "Сохранение отменено" },
     "settings.searchPlaceholder": { zh: "搜索配置项…", en: "Search settings…", ru: "Поиск настроек…" },
     "settings.expandAll": { zh: "展开全部", en: "Expand all", ru: "Развернуть всё" },
     "settings.collapseAll": { zh: "收起全部", en: "Collapse all", ru: "Свернуть всё" },
-    "settings.fieldCount": { zh: "{0} 项", en: "{0} options", ru: "{0} параметров" },
     "settings.noMatches": { zh: "没有匹配的配置项", en: "No matching settings", ru: "Нет подходящих настроек" },
-    "settings.recommended": { zh: "常用", en: "Common", ru: "Частые" },
     "settings.quickTitle": { zh: "常用设置", en: "Common settings", ru: "Частые настройки" },
+
+    /* ---- User profiles ---- */
     "settings.advancedTitle": { zh: "高级设置（按类别折叠）", en: "Advanced settings (grouped and collapsed)", ru: "Расширенные настройки (по категориям)" },
     "settings.catMemory": { zh: "记忆生成与生命周期", en: "Memory generation and lifecycle", ru: "Создание и жизненный цикл памяти" },
     "settings.catRecall": { zh: "召回与工具", en: "Recall and tools", ru: "Поиск и инструменты" },
@@ -191,15 +222,16 @@
     "transfer.exportTitle":{ zh: "有选中项时导出所选，否则导出全部", en: "Export selected memories, or all when none are selected", ru: "Экспортировать выбранные или все записи" },
     "transfer.importTitle":{ zh: "导入 JSON 或 CSV 记忆文件", en: "Import a JSON or CSV memory file", ru: "Импорт файла памяти JSON или CSV" },
     "transfer.exportSuccess":{ zh: "已导出 {0} 条记忆", en: "Exported {0} memories", ru: "Экспортировано записей: {0}" },
+    "transfer.exportTruncated":{ zh: "数据量较大：已导出前 {0} 条（共 {1} 条），可用筛选或减少选中后分批导出。", en: "The library is large: exported the first {0} of {1} memories. Narrow the filters or selection and export in batches.", ru: "Библиотека большая: экспортировано {0} из {1} памятей. Сузьте фильтры или выберите меньше записей и экспортируйте пакетами." },
     "transfer.importPreviewTitle":{ zh: "确认导入记忆", en: "Confirm Memory Import", ru: "Подтвердить импорт памяти" },
     "transfer.importPreview":{ zh: "有效 {0} 条，计划导入 {1} 条，重复 {2} 条，无效 {3} 条，需要 LLM 总结 {4} 条。", en: "Valid: {0}; planned: {1}; duplicates: {2}; invalid: {3}; requiring LLM summaries: {4}.", ru: "Корректно: {0}; к импорту: {1}; дубликаты: {2}; ошибки: {3}; требуют LLM: {4}." },
     "transfer.importSuccess":{ zh: "已导入 {0} 条，跳过重复 {1} 条，失败 {2} 条", en: "Imported {0}; skipped {1} duplicates; failed {2}", ru: "Импортировано: {0}; пропущено дубликатов: {1}; ошибок: {2}" },
+    "transfer.sessionRemapped":{ zh: "；已映射旧会话 ID {0} 条", en: "; remapped {0} legacy session IDs", ru: "; сопоставлено старых ID сессий: {0}" },
     "transfer.fileTooLarge":{ zh: "导入文件不能超过 50 MiB", en: "Import file must not exceed 50 MiB", ru: "Файл импорта не должен превышать 50 MiB" },
     "transfer.failed":    { zh: "记忆导入或导出失败", en: "Memory import or export failed", ru: "Ошибка импорта или экспорта памяти" },
 
 
     /* ---- Detail Drawer ---- */
-    "detail.edit":        { zh: "编辑记忆", en: "Edit Memory", ru: "Редактировать" },
     "detail.source":      { zh: "来源", en: "Source", ru: "Источник" },
     "detail.status":      { zh: "状态", en: "Status", ru: "Статус" },
     "detail.importance":  { zh: "重要性", en: "Importance", ru: "Важность" },
@@ -207,7 +239,6 @@
     "detail.created":     { zh: "创建时间", en: "Created", ru: "Создано" },
 
     /* ---- Edit Modal ---- */
-    "edit.field":         { zh: "编辑字段", en: "Edit Field", ru: "Поле" },
     "edit.updateFailed":  { zh: "更新失败", en: "Update failed", ru: "Ошибка обновления" },
 
     /* ---- Status pills ---- */
@@ -228,16 +259,20 @@
 
 
     /* ---- Graph Toolbar ---- */
-    "graph.queryPh":      { zh: "输入人物、主题、事实或整句，查看召回到的图谱子图", en: "Enter a person, topic, fact or sentence to view the recalled subgraph", ru: "Введите персону, тему, факт или фразу для просмотра подграфа" },
-    "graph.sessionPh":    { zh: "可选：限定 session_id", en: "Optional: limit to session_id", ru: "Опц.: ограничить session_id" },
+    "graph.queryPh":      { zh: "搜索人物、主题或记忆", en: "Search people, topics, or memories", ru: "Поиск людей, тем и воспоминаний" },
+    "graph.sessionPh":    { zh: "按会话 ID 筛选", en: "Filter by session ID", ru: "Фильтр по ID сеанса" },
     "graph.searchBtn":    { zh: "检索图谱", en: "Search Graph", ru: "Искать в графе" },
     "graph.focusOnGraph": { zh: "在图谱中定位", en: "Locate in graph", ru: "Показать на графе" },
     "graph.overviewBtn":  { zh: "全量图谱", en: "Full Graph", ru: "Весь граф" },
     "graph.limitedBtn":   { zh: "受限概览", en: "Limited View", ru: "Ограниченный обзор" },
     "graph.viewMode":     { zh: "图谱维度", en: "Graph dimension", ru: "Измерение графа" },
-    "graph.view2d":       { zh: "2D 平面", en: "2D Plane", ru: "2D Плоскость" },
-    "graph.view3d":       { zh: "3D 空间", en: "3D Space", ru: "3D Пространство" },
+    "graph.view2d":       { zh: "2D", en: "2D", ru: "2D" },
+    "graph.view3d":       { zh: "3D", en: "3D", ru: "3D" },
     "graph.resetView":    { zh: "重置视角", en: "Reset view", ru: "Сбросить вид" },
+    "graph.nodeList":     { zh: "节点列表", en: "Node list", ru: "Список узлов" },
+    "graph.nodeListTitle":{ zh: "图谱节点列表", en: "Graph node list", ru: "Узлы графа" },
+    "graph.nodeListEmpty":{ zh: "当前视图没有节点", en: "No nodes in the current view", ru: "В текущем представлении нет узлов" },
+    "graph.canvasAria":   { zh: "知识图谱画布：{0} 个节点，{1} 条关系", en: "Knowledge graph canvas: {0} nodes, {1} relations", ru: "Холст графа знаний: {0} узлов, {1} связей" },
     "graph.allRelations": { zh: "全部关系", en: "All relations", ru: "Все связи" },
     "graph.pauseMotion":  { zh: "暂停运转", en: "Pause motion", ru: "Остановить движение" },
     "graph.resumeMotion": { zh: "继续运转", en: "Resume motion", ru: "Продолжить движение" },
@@ -277,8 +312,14 @@
     /* ---- Graph Loading ---- */
     "graph.loadingOverview":{ zh: "正在加载图谱概览...", en: "Loading graph overview...", ru: "Загрузка обзора графа..." },
     "graph.layouting":    { zh: "正在生成图谱布局...", en: "Preparing graph layout...", ru: "Подготовка макета графа..." },
+    "graph.queryResult":  { zh: "检索结果 · {0} 个节点 · {1} 条关系", en: "Results · {0} nodes · {1} links", ru: "Результаты · узлов: {0} · связей: {1}" },
     "graph.loadingQuery": { zh: "正在检索\"{0}\"相关图谱...", en: "Retrieving graph for \"{0}\"...", ru: "Поиск графа для \"{0}\"..." },
     "graph.loadingFocus": { zh: "正在聚焦记忆 #{0} 的关系图...", en: "Focusing on relation graph of memory #{0}...", ru: "Фокус на графе связей памяти #{0}..." },
+
+    /* ---- Graph Full Load ---- */
+    "graph.fullGraphConfirm": { zh: "全量图谱可能包含大量节点，加载时间较长并可能被服务端截断，是否继续？", en: "The full graph may contain many nodes. Loading can take a while and may be truncated by the server. Continue?", ru: "Полный граф может содержать много узлов: загрузка может занять время, а ответ может быть усечён сервером. Продолжить?" },
+    "graph.loadingFullGraph": { zh: "正在加载全量图谱（{0}s）...", en: "Loading full graph ({0}s)...", ru: "Загрузка полного графа ({0} с)..." },
+    "graph.cancelled":        { zh: "已取消加载", en: "Loading cancelled", ru: "Загрузка отменена" },
 
     /* ---- Graph Errors (actions) ---- */
     "graph.queryFail":    { zh: "图谱检索失败", en: "Graph retrieval failed", ru: "Ошибка поиска в графе" },
@@ -286,7 +327,6 @@
 
     /* ---- Graph Legend ---- */
     "graph.legendEmpty":  { zh: "暂无图谱连接", en: "No graph connections", ru: "Нет соединений в графе" },
-    "graph.visibleNodes": { zh: "节点 {0} / {1}", en: "Nodes {0} / {1}", ru: "Узлы {0} / {1}" },
     "graph.nodeMeta":     { zh: "{0} 条记忆 · {1} 条连接", en: "{0} memories · {1} links", ru: "{0} памятей · {1} связей" },
 
     /* ---- Graph Panels Content ---- */
@@ -304,7 +344,6 @@
     "recall.sessionPh":   { zh: "输入会话 ID 以过滤特定会话的记忆（支持多种格式）", en: "Enter session ID to filter memories (supports multiple formats)", ru: "Введите ID сессии для фильтрации (разные форматы)" },
     "recall.searchBtn":   { zh: "执行召回", en: "Run Recall", ru: "Запустить поиск" },
     "recall.resultsCount":{ zh: "{0} 条结果", en: "{0} results", ru: "{0} результатов" },
-    "recall.time":        { zh: "查询耗时", en: "Query Time", ru: "Время запроса" },
     "recall.empty":       { zh: "暂无召回结果 · 请输入查询内容并执行召回", en: "No results · Enter a query and run recall", ru: "Нет результатов · Введите запрос и запустите поиск" },
     "recall.noMatch":     { zh: "未找到匹配的记忆", en: "No matching memories found", ru: "Совпадений не найдено" },
     "recall.enterQuery":  { zh: "请输入查询内容", en: "Please enter a query", ru: "Введите запрос" },
@@ -323,6 +362,7 @@
     "misc.requestFailed": { zh: "请求失败", en: "Request failed", ru: "Ошибка запроса" },
     "misc.statsFail":     { zh: "获取统计信息失败", en: "Failed to fetch stats", ru: "Не удалось получить статистику" },
     "misc.fetchMemoriesFail":{ zh: "获取记忆失败", en: "Failed to fetch memories", ru: "Не удалось загрузить память" },
+    "notReady.message":   { zh: "插件尚未初始化完成：请在 AstrBot 配置中启用 Embedding Provider，保存后等待初始化完成。", en: "The plugin is not ready yet: enable an Embedding Provider in the AstrBot configuration and wait for initialization.", ru: "Плагин ещё не готов: включите Embedding Provider в конфигурации AstrBot и дождитесь инициализации." },
 
     /* ---- System ---- */
     "system.importanceDistribution":{ zh: "重要性分布", en: "Importance Distribution", ru: "Распределение важности" },
@@ -342,6 +382,8 @@
     "system.consolidationTitle":{ zh: "记忆整合", en: "Memory Consolidation", ru: "Консолидация памяти" },
     "system.consolidatedCount":{ zh: "已整合", en: "Consolidated", ru: "Консолидировано" },
     "system.consolidationRun":{ zh: "立即整合", en: "Run Now", ru: "Запустить" },
+    "system.consConfirmTitle": { zh: "确认执行记忆整合？", en: "Run memory consolidation?", ru: "Запустить интеграцию памяти?" },
+    "system.consConfirmMessage": { zh: "将立即执行一轮整合：按当前配置合并记忆，并归档或删除原始记忆。", en: "This runs one consolidation pass now: memories are merged and source records are archived or deleted according to the current configuration.", ru: "Сейчас будет запущена одна интеграция: памяти объединяются, а исходные записи архивируются или удаляются согласно текущей конфигурации." },
     "system.consStatus":  { zh: "状态", en: "Status", ru: "Статус" },
     "system.consTrigger": { zh: "触发", en: "Trigger", ru: "Запуск" },
     "system.consTriggerDaily":{ zh: "每日", en: "Daily", ru: "Ежедневно" },
@@ -431,7 +473,6 @@
     "prompt.reset":         { zh: "载入默认内容", en: "Load default content", ru: "Загрузить по умолчанию" },
     "prompt.resetDone":     { zh: "已恢复为默认值", en: "Reset to default", ru: "Сброшено" },
     "prompt.resetFailed":   { zh: "恢复默认失败", en: "Failed to reset prompt", ru: "Не удалось сбросить промпт" },
-    "prompt.defaultFilled": { zh: "已填充默认内容，请点击保存以确认", en: "Default content loaded. Click Save to confirm.", ru: "Содержимое по умолчанию загружено. Нажмите Сохранить." },
     "prompt.defaultFilledStatus": { zh: "（待保存：默认内容）", en: "(Pending: default content)", ru: "(Ожидает: по умолчанию)" },
     "prompt.jsonRequired": { zh: "此模板必须要求 LLM 输出 JSON 格式，修改可能导致记忆功能失效", en: "This template MUST require JSON output from the LLM. Modifying may break memory.", ru: "Этот шаблон ДОЛЖЕН требовать вывод JSON от LLM." },
   };
@@ -439,20 +480,13 @@
   /* Japanese translations, merged into MSG so every entry keeps one shape. */
   const MSG_JA = {
     "appearance.dark": "ダーク",
-    "appearance.editorial": "Editorial · 原野",
-    "appearance.editorialDesc": "クラシックなグリッド · 力強い見出し · シャープなライン",
-    "appearance.hint": "変更はすぐに反映され、設定はこのブラウザに保存されます。",
     "appearance.light": "ライト",
     "appearance.mode": "カラーモード",
     "appearance.paper": "Paper · ページ",
-    "appearance.paperDesc": "暖かな紙色 · セリフ見出し · 読書余白",
     "appearance.studio": "Studio · 軽やか",
-    "appearance.studioDesc": "柔らかな角丸 · 藍紫系 · フローティングカード",
     "appearance.style": "ビジュアルスタイル",
     "appearance.system": "自動",
-    "appearance.systemHint": "自動は AstrBot に従い、単独で開いた場合は端末に従います。",
     "appearance.terminal": "Terminal · 端末",
-    "appearance.terminalDesc": "等幅フォント · 硬質な枠線 · ダッシュボード配置",
     "atom.entity": "エンティティ",
     "atom.event": "出来事",
     "atom.preference": "好み",
@@ -508,7 +542,6 @@
     "detail.contentUpdated": "内容を更新しました（新 ID：{0}）",
     "detail.created": "作成日時",
     "detail.deleteBtn": "削除",
-    "detail.edit": "記憶を編集",
     "detail.editBtn": "編集",
     "detail.editHistory": "編集履歴",
     "detail.graphContext": "ナレッジグラフ関連",
@@ -544,7 +577,6 @@
     "detail.typeUpdated": "種類 → {0}",
     "detail.updateReason": "更新理由（任意）",
     "detail.updated": "更新日時",
-    "edit.field": "編集フィールド",
     "edit.updateFailed": "更新に失敗しました",
     "filter.apply": "絞り込み",
     "filter.keyword": "キーワード（memory_id / 内容検索に対応）",
@@ -579,18 +611,24 @@
     "flow.waitForSave": "処理中です。完了してから移動してください。",
     "flow.working": "処理中です。しばらくお待ちください…",
     "graph.bridgeError": "このページは AstrBot 公式プラグイン View 内で実行する必要があります。",
+    "graph.canvasAria": "知識グラフのキャンバス：{0} ノード、{1} 関係",
+    "graph.cancelled": "読み込みをキャンセルしました",
     "graph.canvasEmpty": "現在の範囲に表示可能なグラフデータがありません。",
     "graph.disabledMsg": "このインスタンスではグラフ記憶が無効です。グラフ記憶を有効にしてインデックスを完了してください。",
     "graph.edges": "関係",
     "graph.errorFetch": "グラフ概要を読み込めません",
     "graph.focusFail": "記憶の特定に失敗しました",
     "graph.focusOnGraph": "グラフ内で特定",
+    "graph.fullGraphConfirm": "全量グラフには多数のノードが含まれる場合があり、読み込みに時間がかかり、サーバー側で切り詰められる可能性があります。続行しますか？",
     "graph.layouting": "グラフレイアウトを生成中...",
     "graph.legendEmpty": "グラフ接続なし",
+    "graph.nodeList": "ノード一覧",
+    "graph.nodeListEmpty": "現在の表示にノードがありません",
+    "graph.nodeListTitle": "グラフのノード一覧",
     "graph.limitedBtn": "制限付き概要",
     "graph.viewMode": "グラフの次元",
-    "graph.view2d": "2D 平面",
-    "graph.view3d": "3D 空間",
+    "graph.view2d": "2D",
+    "graph.view3d": "3D",
     "graph.resetView": "視点をリセット",
     "graph.allRelations": "すべての関係",
     "graph.pauseMotion": "動きを止める",
@@ -600,7 +638,9 @@
     "graph.renderFail": "グラフの読み込みに失敗しました",
     "graph.controls2d": "ドラッグで移動またはノードを移動、ホイールまたはピンチで拡大縮小",
     "graph.loadingFocus": "記憶 #{0} の関係グラフにフォーカス中...",
+    "graph.loadingFullGraph": "全量グラフを読み込み中（{0}秒）...",
     "graph.loadingOverview": "グラフ概要を読み込み中...",
+    "graph.queryResult": "検索結果 · {0} ノード · {1} 件の関係",
     "graph.loadingQuery": "「{0}」に関連するグラフを検索中...",
     "graph.nodeFact": "事実",
     "graph.nodeMeta": "{0} 件の記憶 · {1} 件の接続",
@@ -611,30 +651,60 @@
     "graph.nodes": "ノード",
     "graph.overviewBtn": "全量グラフ",
     "graph.queryFail": "グラフ検索に失敗しました",
-    "graph.queryPh": "人物、テーマ、事実、または文章を入力して、検索されたグラフ部分を表示",
+    "graph.queryPh": "人物、テーマ、記憶を検索",
     "graph.scoreDocKW": "文書キーワード",
     "graph.scoreDocVec": "文書ベクトル",
     "graph.scoreGraphKW": "グラフキーワード",
     "graph.scoreGraphVec": "グラフベクトル",
     "graph.searchBtn": "グラフを検索",
-    "graph.sessionPh": "任意：session_id を指定",
+    "graph.sessionPh": "セッション ID で絞り込む",
     "graph.unnamedNode": "名前なしノード",
-    "graph.visibleNodes": "ノード {0} / {1}",
     "graph2d.moduleFail": "2D グラフモジュールが読み込まれていません。ページを再読み込みしてください。",
     "header.lang": "言語",
     "header.theme": "外観とテーマ",
+    "appearance.macos": "macOS 26",
+    "appearance.tabTheme": "テーマ",
+    "appearance.tabAdvanced": "詳細",
+    "appearance.accent": "アクセントカラー",
+    "appearance.accentCustom": "カスタムカラー",
+    "appearance.wallpaper": "壁紙",
+    "appearance.upload": "画像",
+    "appearance.wp.aurora": "オーロラ",
+    "appearance.wp.dusk": "夕暮れ",
+    "appearance.wp.forest": "森",
+    "appearance.wp.graphite": "グラファイト",
+    "appearance.wp.none": "なし",
+    "appearance.wp.image": "カスタム画像",
+    "appearance.glass": "ガラス",
+    "appearance.radius": "角丸",
+    "appearance.density": "密度",
+    "appearance.font": "フォント",
+    "appearance.optDefault": "標準",
+    "appearance.optSharp": "シャープ",
+    "appearance.optRound": "ラウンド",
+    "appearance.optCompact": "コンパクト",
+    "appearance.optSpacious": "ゆったり",
+    "appearance.optSerif": "セリフ",
+    "appearance.optMono": "等幅",
+    "appearance.css": "カスタム CSS",
+    "appearance.export": "エクスポート",
+    "appearance.import": "インポート",
+    "appearance.reset": "リセット",
+    "appearance.importFailed": "無効なテーマファイルです",
     "language.toast": "言語：{0}",
     "memory.deleteFailed": "記憶の削除に失敗しました",
     "memory.deleted": "記憶を削除しました",
     "misc.fetchMemoriesFail": "記憶の取得に失敗しました",
     "misc.requestFailed": "リクエストに失敗しました",
     "misc.statsFail": "統計情報の取得に失敗しました",
+    "notReady.message": "プラグインはまだ初期化中です。AstrBot の設定で Embedding Provider を有効にし、初期化の完了をお待ちください。",
+    "nav.menu": "メニュー",
     "nav.graph": "ナレッジグラフ",
     "nav.memory": "記憶管理",
     "nav.prompts": "プロンプト管理",
     "nav.settings": "設定",
-    "settings.lead": "詳細設定",
-    "settings.reloadHint": "詳細設定はこのプラグインページにあります。保存後にプラグインを再読み込みするとすべてのコンポーネントに反映されます。",
+    "nav.profile": "ユーザープロファイル",
+    "nav.diagnostics": "診断",
     "settings.save": "保存",
     "settings.adapterUnassigned": "未割当",
     "settings.adapterOwnership": "既存の記憶の所属",
@@ -643,6 +713,14 @@
     "settings.adapterCount": "{0} 件の記憶",
     "settings.saved": "保存しました。プラグインを再読み込みしてください",
     "settings.saveFailed": "設定の保存に失敗しました",
+    "settings.defaultValue": "既定値",
+    "settings.restoreDefault": "既定値に戻す",
+    "settings.reloadRequired": "再読み込みが必要",
+    "settings.dangerTitle": "危険な設定を保存しますか？",
+    "settings.dangerKeepOriginal": "記憶の統合により、統合元の古い記憶が削除され元に戻せません。",
+    "settings.dangerAutoCleanup": "自動クリーンアップにより、古く重要度の低い記憶が完全に削除されます。",
+    "settings.dangerGraphOff": "グラフ記憶を無効にすると、グラフ検索とグラフ表示が使えなくなります。",
+    "settings.saveCancelled": "保存をキャンセルしました",
     "settings.loading": "設定を読み込み中…",
     "settings.loadFailed": "設定の読み込みに失敗しました",
     "settings.empty": "設定できる項目がありません",
@@ -650,9 +728,7 @@
     "settings.searchPlaceholder": "設定を検索…",
     "settings.expandAll": "すべて展開",
     "settings.collapseAll": "すべて折りたたむ",
-    "settings.fieldCount": "{0} 項目",
     "settings.noMatches": "一致する設定がありません",
-    "settings.recommended": "よく使う",
     "settings.quickTitle": "よく使う設定",
     "settings.advancedTitle": "詳細設定（カテゴリ別・折りたたみ）",
     "settings.catMemory": "記憶の生成とライフサイクル",
@@ -671,7 +747,6 @@
     "pagination.prev": "前へ",
     "prompt.customized": "カスタマイズ済み",
     "prompt.customizedStatus": "（カスタマイズ済み）",
-    "prompt.defaultFilled": "デフォルト内容を入力しました。「保存」をクリックして確定してください",
     "prompt.defaultFilledStatus": "（保存待ち：デフォルト内容）",
     "prompt.defaultStatus": "（デフォルト使用中）",
     "prompt.edit": "編集",
@@ -698,7 +773,6 @@
     "recall.searching": "記憶を検索中…",
     "recall.sessionLabel": "セッション ID（任意）",
     "recall.sessionPh": "特定セッションの記憶に絞り込むセッション ID（複数形式対応）",
-    "recall.time": "検索時間",
     "recall.timeElapsed": "所要時間 {0} 秒",
     "sort.createdAsc": "古い順",
     "sort.createdDesc": "新しい順",
@@ -737,6 +811,8 @@
     "system.consTriggerReflection": "リフレクション時",
     "system.consolidatedCount": "統合済み",
     "system.consolidationRun": "今すぐ統合",
+    "system.consConfirmTitle": "記憶の統合を実行しますか？",
+    "system.consConfirmMessage": "今すぐ 1 回分の統合を実行します。現在の設定に従って記憶を統合し、元の記憶をアーカイブまたは削除します。",
     "system.consolidationTitle": "記憶統合",
     "system.fetchFailed": "システムデータの取得に失敗しました",
     "system.files": "ファイル",
@@ -762,6 +838,7 @@
     "transfer.duplicateTitle": "インポート時の重複処理",
     "transfer.export": "エクスポート",
     "transfer.exportSuccess": "{0} 件の記憶をエクスポートしました",
+    "transfer.exportTruncated": "データ量が多いため、先頭 {0} 件（全 {1} 件）のみエクスポートしました。フィルターや選択範囲を絞って分割エクスポートしてください。",
     "transfer.exportTitle": "選択項目がある場合は選択分を、なければすべてをエクスポート",
     "transfer.failed": "記憶のインポートまたはエクスポートに失敗しました",
     "transfer.fileTooLarge": "インポートファイルは 50 MiB 以下にしてください",
@@ -770,6 +847,7 @@
     "transfer.importPreview": "有効 {0} 件、インポート予定 {1} 件、重複 {2} 件、無効 {3} 件、LLM 要約が必要 {4} 件。",
     "transfer.importPreviewTitle": "記憶インポートの確認",
     "transfer.importSuccess": "{0} 件をインポート、重複スキップ {1} 件、失敗 {2} 件",
+    "transfer.sessionRemapped": "。旧セッション ID を {0} 件マッピングしました",
     "transfer.importTitle": "JSON または CSV の記憶ファイルをインポート",
     "transfer.skipDuplicates": "重複をスキップ",
     "type.episodic": "出来事",
@@ -866,16 +944,25 @@
     if (options.persist !== false) {
       try { localStorage.setItem(LANG_KEY, lang); } catch (_) { /* ignore */ }
     }
-    document.documentElement.setAttribute(
-      "lang",
-      lang === "zh" ? "zh-CN" : lang === "ru" ? "ru" : lang === "ja" ? "ja" : "en"
-    );
+    document.documentElement.setAttribute("lang", languageTag(lang));
     applyI18n();
     window.dispatchEvent(new CustomEvent("languagechange", { detail: { lang, source: options.source || "local" } }));
   };
 
   window.getLanguage = function () {
     return currentLang;
+  };
+
+  /**
+   * 懒加载页面在首次进入时注册自己的文案（主表保持首屏最小）。
+   * @param {Object<string, {zh:string,en:string,ru:string,ja:string}>} messages
+   */
+  window.lmRegisterMessages = function (messages) {
+    if (!messages || typeof messages !== "object") return;
+    Object.keys(messages).forEach(function (key) {
+      MSG[key] = Object.assign({}, MSG[key], messages[key]);
+    });
+    applyI18n();
   };
 
   function applyI18n() {
@@ -897,9 +984,14 @@
     });
   }
 
+  /** 把界面语言映射到 <html lang>；ja 之前漏掉会回落成 en。 */
+  function languageTag(lang) {
+    return lang === "zh" ? "zh-CN" : lang === "ru" ? "ru" : lang === "ja" ? "ja" : "en";
+  }
+
   // bootstrap
   currentLang = detectLanguage();
-  document.documentElement.setAttribute("lang", currentLang === "zh" ? "zh-CN" : currentLang === "ru" ? "ru" : "en");
+  document.documentElement.setAttribute("lang", languageTag(currentLang));
   document.addEventListener("DOMContentLoaded", () => {
     applyI18n();
     listenBridgeLocale();

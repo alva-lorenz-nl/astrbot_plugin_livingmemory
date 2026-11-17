@@ -7,11 +7,14 @@ import os
 from collections.abc import AsyncGenerator
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageEventResult
 
 from .base.config_manager import ConfigManager
+from .base.usage_metrics import get_usage_snapshot
+from .command_handler_external import ExternalApiCommandMixin
 from .i18n_backend import t, t_list
 from .managers.conversation_manager import ConversationManager
 from .managers.memory_engine import MemoryEngine
@@ -19,14 +22,16 @@ from .managers.scope_migrator import ScopeMigrator
 from .memory_scope import (
     GLOBAL_MEMORY_SCOPE,
     is_event_memory_allowed,
-    resolve_event_identity,
+    resolve_event_memory_access,
     resolve_memory_scope,
+    resolve_user_memory_scope,
 )
 from .memory_source import serialize_source_messages
-from .validators.index_validator import IndexValidator
+from .retrieval.recall_trace import trace_request_context
+from .validators.index_maintenance import IndexValidator
 
 
-class CommandHandler:
+class CommandHandler(ExternalApiCommandMixin):
     """命令处理器"""
 
     def __init__(
@@ -81,21 +86,10 @@ class CommandHandler:
                 )
         return "\n".join(message)
 
-    @staticmethod
-    def _component_not_ready_message(component: str, command: str) -> str:
-        """Build a consistent component-not-ready response."""
-        return t("error.component_not_ready", component=component, command=command)
-
     async def handle_status(
         self, event: AstrMessageEvent
     ) -> AsyncGenerator[MessageEventResult, None]:
         """处理 /lmem status 命令"""
-        if not self.memory_engine:
-            yield event.plain_result(
-                self._component_not_ready_message("记忆引擎", "/lmem status")
-            )
-            return
-
         try:
             stats = await self.memory_engine.get_statistics()
 
@@ -121,6 +115,15 @@ class CommandHandler:
                 db_size=db_size,
             )
 
+            usage = get_usage_snapshot()
+            message += t(
+                "status.usage",
+                calls=usage["calls"],
+                input_tokens=usage["input_tokens"],
+                output_tokens=usage["output_tokens"],
+                fallback_calls=usage.get("fallback_calls", 0),
+            )
+
             maintenance = stats.get("index_maintenance") or {}
             maintenance_state = str(maintenance.get("state") or "idle")
             if maintenance_state not in {"idle", "ready"}:
@@ -143,16 +146,272 @@ class CommandHandler:
                 )
             )
 
+    @staticmethod
+    def _format_size_mb(value: int | None) -> str:
+        """把字节数格式化为两位小数 MB；None 表示未知。"""
+        if value is None:
+            return t("common.unknown")
+        return f"{value / (1024 * 1024):.2f}"
+
+    @staticmethod
+    def _format_timestamp(value: int | float | None) -> str:
+        """把 epoch 秒格式化为本地时间；缺失/非法值显示 unknown。"""
+        if not isinstance(value, (int, float)) or value <= 0:
+            return t("common.unknown")
+        return datetime.fromtimestamp(value).strftime("%Y-%m-%d %H:%M:%S")
+
+    def _format_diag_report(self, diagnostics: dict) -> str:
+        """把诊断字典渲染成多行文本（缺失字段显示 unknown）。"""
+        unknown = t("common.unknown")
+        documents = diagnostics.get("documents")
+        if isinstance(documents, dict):
+            doc_values = {
+                key: documents.get(key, unknown)
+                for key in ("total", "active", "archived", "deleted")
+            }
+        else:
+            doc_values = dict.fromkeys(
+                ("total", "active", "archived", "deleted"), unknown
+            )
+
+        graph = diagnostics.get("graph")
+        graph_nodes = (
+            graph.get("nodes", unknown) if isinstance(graph, dict) else unknown
+        )
+        graph_edges = (
+            graph.get("edges", unknown) if isinstance(graph, dict) else unknown
+        )
+
+        faiss = diagnostics.get("faiss") or {}
+        faiss_main = faiss.get("main") if faiss.get("main") is not None else unknown
+        faiss_graph = faiss.get("graph") if faiss.get("graph") is not None else unknown
+
+        migration = diagnostics.get("migration") or {}
+        pending = migration.get("pending") or []
+        pending_text = (
+            ", ".join(str(item) for item in pending) if pending else t("common.none")
+        )
+        pending_documents = migration.get("pending_documents")
+        if pending_documents is None:
+            pending_documents = unknown
+        legacy_markers = migration.get("legacy_session_markers", unknown)
+
+        backups = diagnostics.get("backups") or {}
+        backup_count = backups.get("count", unknown)
+        backup_size = self._format_size_mb(backups.get("bytes"))
+        backup_latest = self._format_timestamp(backups.get("latest_at"))
+
+        last_decay = diagnostics.get("last_decay") or {}
+        last_decay_text = last_decay.get("date") or self._format_timestamp(
+            last_decay.get("timestamp")
+        )
+
+        db_version = diagnostics.get("db_version")
+        if db_version is None:
+            db_version = unknown
+
+        return "\n".join(
+            [
+                t("diag.header"),
+                t("diag.db_version", version=db_version),
+                t("diag.quick_check", result=diagnostics.get("quick_check") or unknown),
+                t(
+                    "diag.migration",
+                    pending=pending_text,
+                    pending_documents=pending_documents,
+                    legacy_markers=legacy_markers,
+                ),
+                t("diag.documents", **doc_values),
+                t("diag.graph", nodes=graph_nodes, edges=graph_edges),
+                t("diag.faiss", main=faiss_main, graph=faiss_graph),
+                t(
+                    "diag.storage",
+                    db_size=self._format_size_mb(diagnostics.get("db_bytes")),
+                    wal_size=self._format_size_mb(diagnostics.get("wal_bytes")),
+                    data_dir=self._format_size_mb(diagnostics.get("data_dir_bytes")),
+                ),
+                t(
+                    "diag.backups",
+                    count=backup_count,
+                    size=backup_size,
+                    latest=backup_latest,
+                ),
+                t("diag.last_decay", last_decay=last_decay_text),
+                t("diag.hint"),
+            ]
+        )
+
+    async def handle_diag(
+        self, event: AstrMessageEvent, mode: str = ""
+    ) -> AsyncGenerator[MessageEventResult, None]:
+        """处理 /lmem diag 命令：数据体检；``compact`` 模式执行 VACUUM 压缩。"""
+        normalized = (mode or "").strip().casefold()
+        try:
+            if normalized in {"compact", "vacuum"}:
+                yield event.plain_result(t("diag.compact.starting"))
+                result = await self.memory_engine.compact_storage()
+                yield event.plain_result(
+                    t(
+                        "diag.compact.done",
+                        db_before=self._format_size_mb(result.get("db_size_before")),
+                        db_after=self._format_size_mb(result.get("db_size_after")),
+                        wal_before=self._format_size_mb(result.get("wal_size_before")),
+                        wal_after=self._format_size_mb(result.get("wal_size_after")),
+                        reclaimed=self._format_size_mb(result.get("bytes_reclaimed")),
+                    )
+                )
+                return
+
+            yield event.plain_result(t("diag.collecting"))
+            diagnostics = await self.memory_engine.get_diagnostics()
+            yield event.plain_result(self._format_diag_report(diagnostics))
+        except Exception as e:
+            logger.error(f"数据体检失败: {e}", exc_info=True)
+            yield event.plain_result(
+                self._format_error_message(
+                    t("diag.action_name"),
+                    e,
+                    t_list("error.suggestions.diag"),
+                )
+            )
+
+    async def handle_trace(
+        self, event: AstrMessageEvent, arg: str = ""
+    ) -> AsyncGenerator[MessageEventResult, None]:
+        """处理 /lmem trace 命令：查看最近召回追踪或单条追踪详情。"""
+        recorder = getattr(self.memory_engine, "trace_recorder", None)
+        if recorder is None or not recorder.enabled:
+            yield event.plain_result(t("trace.disabled"))
+            return
+
+        argument = (arg or "").strip()
+        try:
+            if not argument:
+                yield event.plain_result(self._format_trace_list(recorder, 5))
+                return
+            if argument.isdigit():
+                count = max(1, min(int(argument), 50))
+                yield event.plain_result(self._format_trace_list(recorder, count))
+                return
+            detail = recorder.get(argument)
+            if detail is None:
+                yield event.plain_result(t("trace.not_found", id=argument))
+                return
+            yield event.plain_result(self._format_trace_detail(detail))
+        except Exception as e:
+            logger.error(f"读取召回追踪失败: {e}", exc_info=True)
+            yield event.plain_result(t("trace.error", error=e))
+
+    @staticmethod
+    def _format_trace_time(timestamp: Any) -> str:
+        """把 unix 时间戳格式化成命令展示用的本地时间。"""
+        try:
+            return datetime.fromtimestamp(float(timestamp)).strftime("%m-%d %H:%M:%S")
+        except (TypeError, ValueError, OSError):
+            return "-"
+
+    def _format_trace_list(self, recorder, count: int) -> str:
+        """格式化最近召回追踪列表。"""
+        rows = recorder.recent(count)
+        if not rows:
+            return t("trace.empty")
+        lines = [t("trace.header", count=len(rows))]
+        for index, row in enumerate(rows, 1):
+            routes = row.get("routes") or {}
+            route_text = ",".join(
+                f"{name}:{int(info.get('candidates') or 0)}"
+                for name, info in routes.items()
+            )
+            lines.append(
+                t(
+                    "trace.item",
+                    index=index,
+                    id=row.get("id"),
+                    time=self._format_trace_time(row.get("ts")),
+                    session=row.get("session_id") or "-",
+                    query=row.get("query_hash") or "-",
+                    cache=t("trace.cache_hit")
+                    if row.get("cache_hit")
+                    else t("trace.cache_miss"),
+                    routes=route_text or "-",
+                    candidates=int(row.get("candidates") or 0),
+                    injected=int(row.get("injected") or 0),
+                    chars=int(row.get("injected_chars") or 0),
+                    duration=row.get("duration_ms") or 0,
+                )
+            )
+        return "\n".join(lines)
+
+    def _format_trace_detail(self, detail: dict[str, Any]) -> str:
+        """格式化单条召回追踪详情：路由、过滤原因、候选与注入。"""
+        lines = [
+            t(
+                "trace.detail_header",
+                id=detail.get("id"),
+                time=self._format_trace_time(detail.get("ts")),
+                session=detail.get("session_id") or "-",
+                query=detail.get("query_hash") or "-",
+                cache=t("trace.cache_hit")
+                if detail.get("cache_hit")
+                else t("trace.cache_miss"),
+                duration=detail.get("duration_ms") or 0,
+                candidates=len(detail.get("candidates") or []),
+            )
+        ]
+        for name, route in (detail.get("routes") or {}).items():
+            error = route.get("error")
+            lines.append(
+                t(
+                    "trace.detail_route",
+                    name=name,
+                    candidates=int(route.get("candidates") or 0),
+                    ok=bool(route.get("ok")),
+                    ms=route.get("ms") or 0,
+                    error=f" error={error}" if error else "",
+                )
+            )
+        filters = detail.get("filters") or {}
+        rejected = filters.get("rejected") or {}
+        rejected_text = ",".join(
+            f"{reason}:{int(value)}" for reason, value in rejected.items()
+        )
+        lines.append(
+            t(
+                "trace.detail_filters",
+                min_similarity=filters.get("min_similarity", 0.0),
+                min_importance=filters.get("min_importance", 0.0),
+                rejected=rejected_text or "-",
+            )
+        )
+        for candidate in (detail.get("candidates") or [])[:5]:
+            lines.append(
+                t(
+                    "trace.detail_candidate",
+                    doc_id=candidate.get("doc_id"),
+                    score=candidate.get("final_score"),
+                    bm25=candidate.get("bm25"),
+                    vector=candidate.get("vector"),
+                )
+            )
+        injected = detail.get("injected") or []
+        lines.append(
+            t(
+                "trace.detail_injected",
+                count=len(injected),
+                chars=int(detail.get("injected_chars") or 0),
+            )
+        )
+        notes = detail.get("notes") or []
+        if notes:
+            lines.append(t("trace.detail_notes", notes="; ".join(notes)))
+        if detail.get("error"):
+            lines.append(t("trace.error", error=detail.get("error")))
+        return "\n".join(lines)
+
     async def handle_search(
         self, event: AstrMessageEvent, query: str, k: int = 5
     ) -> AsyncGenerator[MessageEventResult, None]:
         """处理 /lmem search 命令"""
-        if not self.memory_engine:
-            yield event.plain_result(
-                self._component_not_ready_message("记忆引擎", "/lmem search")
-            )
-            return
-
         # 输入验证
         if not query or not query.strip():
             yield event.plain_result(t("search.query_empty"))
@@ -161,11 +420,27 @@ class CommandHandler:
         # 限制k的范围为1-100
         k = max(1, min(k, 100))
 
+        # 与召回、反思、Agent 工具共用同一套白名单/人格/作用域解析，
+        # 避免 global/user 作用域下命令搜不到数据。
+        access = await resolve_event_memory_access(
+            self.config_manager, self.context, event
+        )
+        if not access.allowed:
+            yield event.plain_result(t("search.access_denied"))
+            return
+
         try:
-            session_id = event.unified_msg_origin
-            results = await self.memory_engine.search_memories(
-                query=query.strip(), k=k, session_id=session_id
-            )
+            with trace_request_context(
+                session_id=event.unified_msg_origin,
+                scope=access.scope,
+                persona_id=access.persona_id,
+            ):
+                results = await self.memory_engine.search_memories(
+                    query=query.strip(),
+                    k=k,
+                    session_id=access.scope,
+                    persona_id=access.persona_id,
+                )
 
             if not results:
                 yield event.plain_result(t("search.no_results", query=query))
@@ -211,12 +486,6 @@ class CommandHandler:
         self, event: AstrMessageEvent, doc_id: int
     ) -> AsyncGenerator[MessageEventResult, None]:
         """处理 /lmem forget 命令"""
-        if not self.memory_engine:
-            yield event.plain_result(
-                self._component_not_ready_message("记忆引擎", "/lmem forget")
-            )
-            return
-
         # 输入验证
         if doc_id < 0:
             yield event.plain_result(t("forget.id_invalid"))
@@ -242,35 +511,10 @@ class CommandHandler:
         self, event: AstrMessageEvent
     ) -> AsyncGenerator[MessageEventResult, None]:
         """处理 /lmem rebuild-index 命令"""
-        if not self.memory_engine or not self.index_validator:
-            yield event.plain_result(
-                self._component_not_ready_message(
-                    "记忆引擎或索引验证器", "/lmem rebuild-index"
-                )
-            )
-            return
-
         try:
             yield event.plain_result(t("rebuild_index.checking"))
 
-            # 检查索引一致性
-            status = await self.index_validator.check_consistency()
-
-            if status.is_consistent and not status.needs_rebuild:
-                yield event.plain_result(t("rebuild_index.ok", reason=status.reason))
-                return
-
-            # 显示当前状态
-            status_msg = t(
-                "rebuild_index.status_template",
-                doc_count=status.documents_count,
-                bm25_count=status.bm25_count,
-                vec_count=status.vector_count,
-                reason=status.reason,
-            )
-            yield event.plain_result(status_msg)
-
-            # 执行重建
+            # 索引维护单入口：直接重建/补写，不再预先做全表一致性比对
             result = await self.index_validator.rebuild_indexes(self.memory_engine)
 
             if result["success"]:
@@ -331,9 +575,7 @@ class CommandHandler:
         if key == "session":
             return str(getattr(event, "unified_msg_origin", "") or "")
         if key == "user":
-            platform = str(event.get_platform_name() or "").casefold()
-            identity = resolve_event_identity(self.config_manager, event).casefold()
-            return f"livingmemory:user:{platform or 'unknown'}:{identity}"
+            return resolve_user_memory_scope(self.config_manager, event)
         return value
 
     def _scope_migration_backup_path(self) -> Path:
@@ -364,12 +606,6 @@ class CommandHandler:
         也接受 ``dry-run`` 以显式预览。``source`` 传 ``all`` / ``*`` / ``-`` 表示
         全部来源，其余按 ``global`` / ``session`` / ``user`` 关键字或字面作用域解析。
         """
-        if not self.memory_engine:
-            yield event.plain_result(
-                self._component_not_ready_message("记忆引擎", "/lmem migrate-scope")
-            )
-            return
-
         try:
             resolved = self._resolve_target_scope(event, target)
             if not resolved:
@@ -393,14 +629,6 @@ class CommandHandler:
                 source_scope = self._resolve_target_scope(event, raw_source)
 
             db_connection = getattr(self.memory_engine, "db_connection", None)
-            if db_connection is None:
-                yield event.plain_result(
-                    self._component_not_ready_message(
-                        "数据库连接", "/lmem migrate-scope"
-                    )
-                )
-                return
-
             migrator = ScopeMigrator(db_connection)
             breakdown = await migrator.survey()
             plan = await migrator.plan(resolved, source=source_scope)
@@ -509,12 +737,6 @@ class CommandHandler:
         self, event: AstrMessageEvent
     ) -> AsyncGenerator[MessageEventResult, None]:
         """处理 /lmem rebuild-graph 命令"""
-        if not self.memory_engine:
-            yield event.plain_result(
-                self._component_not_ready_message("记忆引擎", "/lmem rebuild-graph")
-            )
-            return
-
         try:
             yield event.plain_result(t("rebuild_graph.starting"))
             result = await self.memory_engine.rebuild_graph_index()
@@ -545,14 +767,6 @@ class CommandHandler:
         self, event: AstrMessageEvent, message_count: int | None = None
     ) -> AsyncGenerator[MessageEventResult, None]:
         """处理 /lmem summarize 命令 - 立即触发记忆总结"""
-        if not self.conversation_manager or not self.memory_engine:
-            yield event.plain_result(
-                self._component_not_ready_message(
-                    "会话管理器或记忆引擎", "/lmem summarize"
-                )
-            )
-            return
-
         session_id = event.unified_msg_origin
         try:
             if not is_event_memory_allowed(self.config_manager, event):
@@ -630,12 +844,6 @@ class CommandHandler:
             if not is_group_chat and "GroupMessage" in session_id:
                 is_group_chat = True
 
-            if not self._memory_processor:
-                yield event.plain_result(
-                    self._component_not_ready_message("记忆处理器", "/lmem summarize")
-                )
-                return
-
             (
                 content,
                 metadata,
@@ -661,8 +869,9 @@ class CommandHandler:
                 "triggered_by": "manual",
             }
             metadata["source_session_id"] = session_id
+            profile_updates = metadata.pop("profile_updates", []) or []
 
-            await self.memory_engine.add_memory(
+            memory_id = await self.memory_engine.add_memory(
                 content=content,
                 session_id=memory_scope,
                 persona_id=persona_id,
@@ -681,6 +890,14 @@ class CommandHandler:
                     else None
                 ),
             )
+
+            if profile_updates and memory_id is not None:
+                await self._apply_manual_profile_updates(
+                    memory_scope,
+                    persona_id,
+                    profile_updates,
+                    memory_id,
+                )
 
             await self.conversation_manager.update_session_metadata(
                 session_id, "last_summarized_index", actual_count
@@ -709,16 +926,48 @@ class CommandHandler:
                 )
             )
 
+    async def _apply_manual_profile_updates(
+        self,
+        memory_scope: str,
+        persona_id,
+        updates: list,
+        memory_id: int,
+    ) -> None:
+        """Apply profile updates produced by a manual summary.
+
+        Args:
+            memory_scope: Resolved memory scope.
+            persona_id: Persona id of the summary.
+            updates: Normalised profile updates from the summary metadata.
+            memory_id: Memory written by this manual summary (evidence id).
+        """
+        manager = getattr(self.memory_engine, "profile_manager", None)
+        if manager is None:
+            return
+        try:
+            result = await manager.apply_updates(
+                memory_scope,
+                persona_id,
+                updates,
+                evidence_memory_ids=[int(memory_id)],
+                source="manual_summary",
+            )
+        except Exception:
+            logger.warning(
+                "手动总结的用户档案更新失败（不影响记忆入库）", exc_info=True
+            )
+            return
+        logger.info(
+            "手动总结的用户档案更新: applied=%s, pending=%s, version=%s",
+            result.get("applied", 0),
+            result.get("pending", 0),
+            result.get("version"),
+        )
+
     async def handle_reset(
         self, event: AstrMessageEvent
     ) -> AsyncGenerator[MessageEventResult, None]:
         """处理 /lmem reset 命令"""
-        if not self.conversation_manager:
-            yield event.plain_result(
-                self._component_not_ready_message("会话管理器", "/lmem reset")
-            )
-            return
-
         session_id = event.unified_msg_origin
         try:
             await self.conversation_manager.clear_session(session_id)

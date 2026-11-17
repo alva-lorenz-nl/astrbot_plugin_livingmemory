@@ -15,7 +15,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
+  backend:
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -44,6 +44,7 @@ jobs:
             AstrBot/data/plugins/astrbot_plugin_livingmemory/requirements.txt
             AstrBot/data/plugins/astrbot_plugin_livingmemory/requirements-dev.txt
 
+      # dashboard 资产检查用例需要 node；缺失时该用例会跳过，保持覆盖率不降。
       - name: Set up Node.js
         uses: actions/setup-node@v6
         with:
@@ -60,10 +61,57 @@ jobs:
         working-directory: AstrBot/data/plugins/astrbot_plugin_livingmemory
         run: npm ci
 
-      - name: Run test suite
+      - name: Lint and format check
         working-directory: AstrBot/data/plugins/astrbot_plugin_livingmemory
-        run: python -m pytest -q
+        run: |
+          python -m ruff check .
+          python -m ruff format --check .
+
+      - name: Run test suite with coverage
+        working-directory: AstrBot/data/plugins/astrbot_plugin_livingmemory
+        run: python -m coverage run -m pytest -q
+
+      - name: Check coverage threshold
+        working-directory: AstrBot/data/plugins/astrbot_plugin_livingmemory
+        run: |
+          python -m coverage report --fail-under=84
+          python -m coverage xml
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: AstrBot/data/plugins/astrbot_plugin_livingmemory/coverage.xml
+          if-no-files-found: error
+
+      # 召回排序/相关性门槛的离线回归门禁：合成数据 + 确定性 embedding，
+      # 无网络、无 API 费用，基线见 tests/eval/baseline.json。
+      - name: Run offline recall quality evaluation
+        working-directory: AstrBot/data/plugins/astrbot_plugin_livingmemory
+        run: python -m pytest -q -m eval
+
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout LivingMemory
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Install frontend dependencies
+        run: npm ci
 
       - name: Run frontend tests
-        working-directory: AstrBot/data/plugins/astrbot_plugin_livingmemory
         run: npm run test:frontend
+
+      - name: Check dashboard bundles
+        run: node scripts/build_dashboard.mjs --check
+
+      - name: Build documentation
+        run: npm run docs:build

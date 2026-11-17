@@ -3,6 +3,8 @@
  * 提供统一的 API 请求、错误处理和重试机制
  */
 
+import { unwrapResponse } from "./utils.js";
+
 export class ApiClient {
   constructor() {
     this.bridge = window.AstrBotPluginView || window.AstrBotPluginPage;
@@ -91,8 +93,18 @@ export class ApiClient {
           }
           return await this.bridge.apiGet(this.buildEndpoint(path), {});
         }
-        // POST
-        return await this.bridge.apiPost(this.buildEndpoint(path), body || {});
+        /* POST/PUT/DELETE 由宿主插件视图 bridge 转发；旧宿主只有 apiGet/apiPost，
+           PUT/DELETE 缺失时明确报错，避免静默退化成错误的 POST。 */
+        const bridgeMethod = {
+          POST: "apiPost",
+          PUT: "apiPut",
+          DELETE: "apiDelete",
+        }[method];
+        if (!bridgeMethod || typeof this.bridge[bridgeMethod] !== "function") {
+          const base = window.t ? window.t("misc.requestFailed") : "Request failed";
+          throw new Error(`${base}: ${method}`);
+        }
+        return await this.bridge[bridgeMethod](this.buildEndpoint(path), body || {});
       } catch (e) {
         lastError = e;
         if (attempt === retries) throw e;
@@ -103,28 +115,6 @@ export class ApiClient {
       }
     }
     throw lastError || new Error(window.t ? window.t("misc.requestFailed") : "Request failed");
-  }
-
-  /**
-   * 解包 API 响应
-   *
-   * 后端返回格式：
-   * - 成功：{status: "ok", data: {...}}
-   * - 失败：{status: "error", message: "..."}
-   *
-   * Dashboard bridge unwraps standard plugin responses before returning them.
-   *
-   * @param {Object} response - API 响应
-   * @returns {any} 解包后的数据
-   */
-  unwrapResponse(response) {
-    if (response && response.status === "ok" && Object.prototype.hasOwnProperty.call(response, "data")) {
-      return response.data;
-    }
-    if (response && response.status === "error") {
-      throw new Error(response.message || (window.t ? window.t("misc.requestFailed") : "Request failed"));
-    }
-    return response || {};
   }
 
   /**
@@ -140,7 +130,7 @@ export class ApiClient {
     const fullPath = qs ? `${path}?${qs}` : path;
     if (!this._pendingGets.has(fullPath)) {
       const pending = this.request(fullPath, { method: "GET" })
-        .then(response => this.unwrapResponse(response))
+        .then(response => unwrapResponse(response))
         .finally(() => this._pendingGets.delete(fullPath));
       this._pendingGets.set(fullPath, pending);
     }
@@ -154,9 +144,39 @@ export class ApiClient {
    * @returns {Promise<any>} 响应数据
    */
   async post(path, body = {}, options = {}) {
-    return this.unwrapResponse(await this.request(path, {
+    return unwrapResponse(await this.request(path, {
       method: "POST",
       body,
+      retries: options.retries,
+    }));
+  }
+
+  /**
+   * PUT 请求。当前宿主插件视图 bridge 只暴露 apiGet/apiPost，档案页的
+   * 保存/删除已改用 POST 别名；保留本方法给未来支持 apiPut 的宿主使用。
+   * @param {string} path - API 路径
+   * @param {Object} body - 请求体
+   * @param {Object} options - { retries }
+   * @returns {Promise<any>} 解包后的响应
+   */
+  async put(path, body = {}, options = {}) {
+    return unwrapResponse(await this.request(path, {
+      method: "PUT",
+      body,
+      retries: options.retries,
+    }));
+  }
+
+  /**
+   * DELETE 请求。同上：保留给未来支持 apiDelete 的宿主；当前页面用 POST 别名。
+   * @param {string} path - API 路径
+   * @param {Object} options - { retries, body }
+   * @returns {Promise<any>} 解包后的响应
+   */
+  async delete(path, options = {}) {
+    return unwrapResponse(await this.request(path, {
+      method: "DELETE",
+      body: options.body,
       retries: options.retries,
     }));
   }

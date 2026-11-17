@@ -3,7 +3,6 @@ main.py - LivingMemory 插件主文件
 负责插件注册、初始化和生命周期管理
 """
 
-from .core.memory_scope import adapter_access
 import asyncio
 import re
 from collections.abc import AsyncGenerator
@@ -22,6 +21,7 @@ from .core.event_handler import EventHandler
 from .core.i18n_backend import init as i18n_init
 from .core.i18n_backend import t
 from .core.managers.backup_manager import BackupManager
+from .core.memory_scope import adapter_access
 from .core.page_api import PluginPageApi
 from .core.passive_group_capture import (
     PassiveGroupCaptureFilter,
@@ -37,6 +37,7 @@ from .core.tools import (
     MemoryMemorizeTool,
     MemoryReadTool,
     MemorySearchTool,
+    UpdateUserProfileTool,
 )
 
 _MIN_ASTRBOT_VERSION = "4.24.2"
@@ -127,6 +128,7 @@ class LivingMemoryPlugin(Star):
         self._component_init_lock = asyncio.Lock()
         self._llm_tools_registered = False
         self._terminating = False
+        self._external_api_server = None
 
         self.page_api = PluginPageApi(self)
         self.page_api.register_routes()
@@ -139,14 +141,31 @@ class LivingMemoryPlugin(Star):
         """创建并跟踪后台任务"""
         task = asyncio.create_task(coro)
         self._background_tasks.add(task)
-        task.add_done_callback(self._background_tasks.discard)
+        task.add_done_callback(self._on_background_task_done)
         return task
+
+    def _on_background_task_done(self, task: asyncio.Task) -> None:
+        """取回后台任务异常并记录，避免静默失败。"""
+        self._background_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error(f"Background task failed: {exc}", exc_info=exc)
 
     async def _initialize_plugin(self):
         """初始化插件"""
         try:
             # 版本变更时自动备份数据（在任何数据库操作之前，通过线程池避免阻塞事件循环）
             await self._backup_manager.backup_if_needed_async()
+
+            # 启动时清理历史备份（版本/适配器/作用域迁移/每日备份）；失败不阻断初始化
+            try:
+                await self._backup_manager.prune_async(
+                    keep_days=self.config_manager.get("backup_settings.keep_days", 7)
+                )
+            except Exception as e:
+                logger.warning(f"[BackupManager] 备份清理失败: {e}")
 
             # 执行初始化
             success = await self.initializer.initialize()
@@ -202,8 +221,43 @@ class LivingMemoryPlugin(Star):
                 )
 
             self._register_agent_tools_if_needed()
+            await self._ensure_external_api_server()
 
         return True
+
+    async def _ensure_external_api_server(self) -> None:
+        """Start the standalone external API listener once when it is enabled."""
+        if self._external_api_server is not None:
+            return
+        if not self.config_manager.get("external_api.enabled", False):
+            return
+        engine = self.initializer.memory_engine if self.initializer else None
+        if engine is None:
+            return
+        from .core.external_api import ExternalApiService
+        from .core.external_api_server import ExternalApiServer
+
+        data_dir = getattr(self.initializer, "data_dir", None) or "."
+        service = ExternalApiService(self.config_manager, engine, data_dir)
+        try:
+            await service.ensure_initialized()
+        except Exception as exc:
+            logger.error("[ExternalAPI] 初始化失败: %s", exc, exc_info=True)
+            return
+        server = ExternalApiServer(
+            service,
+            host=str(self.config_manager.get("external_api.listen_host", "127.0.0.1")),
+            port=int(self.config_manager.get("external_api.listen_port", 7801)),
+        )
+        if server.start():
+            self._external_api_server = server
+
+    async def _stop_external_api_server(self) -> None:
+        """Stop the external API listener if it is running."""
+        server = self._external_api_server
+        self._external_api_server = None
+        if server is not None:
+            server.stop()
 
     def _register_agent_tools_if_needed(self) -> None:
         """在核心组件就绪后注册 Agent 工具（回忆/写入）。
@@ -257,6 +311,14 @@ class LivingMemoryPlugin(Star):
         if self.config_manager.get("agent_tools.enable_forget_tool", False):
             tools.append(
                 MemoryForgetTool(
+                    context=self.context,
+                    config_manager=self.config_manager,
+                    memory_engine=self.initializer.memory_engine,
+                )
+            )
+        if self.config_manager.get("agent_tools.enable_profile_tool", False):
+            tools.append(
+                UpdateUserProfileTool(
                     context=self.context,
                     config_manager=self.config_manager,
                     memory_engine=self.initializer.memory_engine,
@@ -341,7 +403,12 @@ class LivingMemoryPlugin(Star):
         return t("command.not_ready")
 
     async def _run_command(
-        self, event: AstrMessageEvent, handler_name: str, *args, **kwargs
+        self,
+        event: AstrMessageEvent,
+        handler_name: str,
+        *args,
+        write: bool = False,
+        **kwargs,
     ) -> AsyncGenerator[MessageEventResult, None]:
         """统一命令入口：就绪检查 + 委托 command_handler。
 
@@ -352,6 +419,7 @@ class LivingMemoryPlugin(Star):
             event: 命令事件。
             handler_name: CommandHandler 上的处理方法名。
             *args: 传给处理方法的额外位置参数。
+            write: 命令是否会写入记忆，决定适配器访问作用域的写权限。
             **kwargs: 传给处理方法的额外关键字参数。
 
         Yields:
@@ -368,18 +436,14 @@ class LivingMemoryPlugin(Star):
         messages = handler(event, *args, **kwargs)
         try:
             while True:
-                with adapter_access(
-                    self.config_manager, event, write=handler_name == "handle_summarize"
-                ):
+                with adapter_access(self.config_manager, event, write=write):
                     try:
                         item = await anext(messages)
                     except StopAsyncIteration:
                         return
                 yield item
         finally:
-            with adapter_access(
-                self.config_manager, event, write=handler_name == "handle_summarize"
-            ):
+            with adapter_access(self.config_manager, event, write=write):
                 await messages.aclose()
 
     # ==================== 事件钩子 ====================
@@ -454,6 +518,24 @@ class LivingMemoryPlugin(Star):
             yield message
 
     @permission_type(PermissionType.ADMIN)
+    @lmem.command("diag")
+    async def diag(
+        self, event: AstrMessageEvent, mode: str = ""
+    ) -> AsyncGenerator[MessageEventResult, None]:
+        """[Admin] Show data diagnostics; `compact` runs VACUUM"""
+        async for message in self._run_command(event, "handle_diag", mode):
+            yield message
+
+    @permission_type(PermissionType.ADMIN)
+    @lmem.command("trace")
+    async def trace(
+        self, event: AstrMessageEvent, arg: str = ""
+    ) -> AsyncGenerator[MessageEventResult, None]:
+        """[Admin] Inspect recall traces: `trace [n]` or `trace <id>`"""
+        async for message in self._run_command(event, "handle_trace", arg):
+            yield message
+
+    @permission_type(PermissionType.ADMIN)
     @lmem.command("search", priority=10)
     async def search(
         self, event: AstrMessageEvent, query: str, k: int = 5
@@ -505,6 +587,32 @@ class LivingMemoryPlugin(Star):
             yield message
 
     @permission_type(PermissionType.ADMIN)
+    @lmem.command("apikey")
+    async def apikey(
+        self,
+        event: AstrMessageEvent,
+        action: str = "list",
+        name: str = "",
+        mode: str = "read",
+        personas: str = "",
+        scopes: str = "",
+        rate: int = 0,
+    ) -> AsyncGenerator[MessageEventResult, None]:
+        """[Admin] Manage external memory API keys (create/list/revoke)"""
+        async for message in self._run_command(
+            event,
+            "handle_apikey",
+            action,
+            name,
+            mode,
+            personas,
+            scopes,
+            rate,
+            write=True,
+        ):
+            yield message
+
+    @permission_type(PermissionType.ADMIN)
     @lmem.command("webui")
     async def webui(
         self, event: AstrMessageEvent
@@ -520,7 +628,10 @@ class LivingMemoryPlugin(Star):
     ) -> AsyncGenerator[MessageEventResult, None]:
         """[Admin] Immediately trigger memory summarization for current session"""
         async for message in self._run_command(
-            event, "handle_summarize", message_count
+            event,
+            "handle_summarize",
+            message_count,
+            write=True,
         ):
             yield message
 
@@ -577,6 +688,9 @@ class LivingMemoryPlugin(Star):
                     task.cancel()
             await asyncio.gather(*self._background_tasks, return_exceptions=True)
             self._background_tasks.clear()
+
+        # 关闭外部记忆 API 监听
+        await self._stop_external_api_server()
 
         # 停止初始化后台任务（如Provider重试）
         await self.initializer.stop_background_tasks()

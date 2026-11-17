@@ -18,13 +18,16 @@ from ..memory_scope import (
     conversation_visible,
     is_event_memory_allowed,
     is_suspicious_session_id,
-    resolve_memory_scope,
+    resolve_event_memory_access,
 )
+from ..retrieval.recall_trace import trace_request_context
 from ..utils import (
     OperationContext,
+    attach_profile_to_memory_injection,
     format_memories_for_injection,
+    format_profile_block_for_injection,
+    format_profile_for_injection,
     get_conversation_id,
-    get_persona_id,
 )
 from .memory_reflection import cancel_session_storage_task
 
@@ -32,7 +35,6 @@ if TYPE_CHECKING:
     from ..base.config_manager import ConfigManager
     from ..managers.conversation_manager import ConversationManager
     from ..managers.memory_engine import MemoryEngine
-    from ..utils.injection_adapter import InjectionAdapter
     from .message_utils import MessageUtils
 
 
@@ -46,7 +48,6 @@ class MemoryRecall:
         memory_engine: "MemoryEngine",
         conversation_manager: "ConversationManager",
         message_utils: "MessageUtils",
-        injection_adapter: "InjectionAdapter",
         storage_session_tasks: dict[str, asyncio.Task] | None = None,
     ):
         """
@@ -58,7 +59,6 @@ class MemoryRecall:
             memory_engine: 记忆引擎
             conversation_manager: 会话管理器
             message_utils: 消息处理工具
-            injection_adapter: 注入适配器
             storage_session_tasks: 会话 -> 进行中总结任务映射（共享状态），
                 用于在检测到 WebUI 编辑/重试回滚后取消过期总结任务
         """
@@ -67,7 +67,6 @@ class MemoryRecall:
         self.memory_engine = memory_engine
         self.conversation_manager = conversation_manager
         self.message_utils = message_utils
-        self.injection_adapter = injection_adapter
         self._storage_session_tasks: dict[str, asyncio.Task] = (
             storage_session_tasks if storage_session_tasks is not None else {}
         )
@@ -176,7 +175,7 @@ class MemoryRecall:
                 # 若 top_k <= 0，跳过记忆检索和注入，但上述清理和消息存储已执行
                 top_k = self.config_manager.get("recall_engine.top_k", 5)
                 if top_k <= 0:
-                    logger.info(
+                    logger.debug(
                         f"[{session_id}] top_k={top_k} <= 0，跳过记忆检索和注入"
                     )
                     return
@@ -185,22 +184,13 @@ class MemoryRecall:
                     logger.warning(f"[{session_id}] 原始用户消息为空，跳过记忆召回")
                     return
 
-                # 获取过滤配置
-                filtering_config = self.config_manager.filtering_settings
-                use_persona_filtering = filtering_config.get(
-                    "use_persona_filtering", True
+                # on_llm_request 钩子在 _ensure_persona_and_skills 之前触发，
+                # 因此人格需按三级优先级自行解析；召回与写入共用同一解析入口。
+                recall_access = await resolve_event_memory_access(
+                    self.config_manager, self.context, event
                 )
-
-                # 获取 persona_id，与 AstrBot 主流程保持一致的三级优先级：
-                # 1. session_service_config（最高）
-                # 2. req.conversation.persona_id（会话级）
-                # 3. 全局默认人格（最低）
-                # 注意：on_llm_request 钩子在 _ensure_persona_and_skills 之前触发，
-                # 因此不能直接依赖 req.system_prompt 已注入人格，需自行走完整优先级。
-                persona_id = await get_persona_id(self.context, event)
-
-                recall_session_id = resolve_memory_scope(self.config_manager, event)
-                recall_persona_id = persona_id if use_persona_filtering else None
+                recall_session_id = recall_access.scope
+                recall_persona_id = recall_access.persona_id
 
                 # 使用原始用户输入作为召回关键字
                 query_for_search = actual_query
@@ -241,7 +231,7 @@ class MemoryRecall:
                             if context_parts:
                                 expanded = " | ".join(context_parts)
                                 query_for_search = expanded + " " + actual_query
-                                logger.info(
+                                logger.debug(
                                     f"[{session_id}] 上下文扩展查询: "
                                     f"{len(context_parts)}条历史消息 + 当前消息，"
                                     f"按时间跳过={skipped_by_age}条"
@@ -250,12 +240,13 @@ class MemoryRecall:
                         logger.warning(f"[{session_id}] 获取上下文扩展失败: {e}")
 
                 # 执行记忆召回
-                logger.info(
+                logger.debug(
                     f"[{session_id}] 开始记忆召回，查询='{query_for_search[:80]}...'"
                 )
 
+                channel_scope = recall_access.channel_scope
                 filter_conversation = self.config_manager.get(
-                    "filtering_settings.use_conversation_filtering", False
+                    "filtering_settings.use_conversation_filtering", True
                 )
                 fallback_global = self.config_manager.get(
                     "filtering_settings.fallback_to_global_conversations", True
@@ -265,23 +256,43 @@ class MemoryRecall:
                     if filter_conversation
                     else None
                 )
-
-                recalled_memories = await self.memory_engine.search_memories(
-                    query=query_for_search,
-                    k=self.config_manager.get("recall_engine.top_k", 5),
-                    session_id=recall_session_id,
+                with trace_request_context(
+                    session_id=session_id,
+                    scope=recall_session_id,
                     persona_id=recall_persona_id,
-                    conversation_id=current_cid if filter_conversation else None,
-                    fallback_to_global_conversations=fallback_global,
+                ) as request_trace:
+                    try:
+                        recalled_memories = await self.memory_engine.search_memories(
+                            query=query_for_search,
+                            k=self.config_manager.get("recall_engine.top_k", 5),
+                            session_id=recall_session_id,
+                            persona_id=recall_persona_id,
+                            extra_scopes=[channel_scope] if channel_scope else None,
+                            conversation_id=current_cid,
+                            fallback_to_global_conversations=fallback_global,
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        # 记忆检索失败不影响用户档案注入与主流程。
+                        logger.warning(
+                            f"[{session_id}] 记忆检索失败（跳过记忆注入）",
+                            exc_info=True,
+                        )
+                        recalled_memories = []
+                # 用户档案是固定短块：不占 top_k 名额，只计入追加的注入字符预算。
+                profile_text = await self._load_profile_injection_text(
+                    recall_session_id, recall_persona_id
                 )
 
+                memory_str = ""
                 if recalled_memories:
-                    logger.info(
+                    logger.debug(
                         f"[{session_id}] 检索到 {len(recalled_memories)} 条记忆"
                     )
 
-                    # 对话线隔离过滤：如果开启了按会话线隔离，只保留无 cid（全局）或 cid 匹配当前对话的记忆
-                    if filter_conversation:
+                    # 对话线隔离兜底过滤：只保留无 cid（全局旧记忆）或 cid 匹配当前对话的记忆
+                    if filter_conversation and current_cid:
                         before_count = len(recalled_memories)
                         recalled_memories = [
                             m
@@ -294,7 +305,8 @@ class MemoryRecall:
                         ]
                         if len(recalled_memories) < before_count:
                             logger.info(
-                                f"[{session_id}] 经对话隔离过滤，记忆从 {before_count} 筛选至 {len(recalled_memories)} 条 (当前cid={current_cid})"
+                                f"[{session_id}] 经对话线隔离过滤，记忆从 {before_count} "
+                                f"筛选至 {len(recalled_memories)} 条 (当前cid={current_cid})"
                             )
 
                     # 格式化并注入记忆
@@ -317,40 +329,110 @@ class MemoryRecall:
                             f"内容={mem.content[:100]}..."
                         )
 
-                    # 注入策略适配层负责把历史配置值映射到唯一的 add-only
-                    # 注入方式，废弃模式会返回回退原因供日志提示。
-                    configured_method = self.config_manager.get(
-                        "recall_engine.injection_method", "extra_user_content"
-                    )
-                    injection_method, fallback_reason = self.injection_adapter.resolve(
-                        configured_method
-                    )
-                    if fallback_reason:
+                    try:
+                        memory_str = format_memories_for_injection(memory_list)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
                         logger.warning(
-                            f"[{session_id}] 注入方式从 {configured_method} 回退为 "
-                            f"{injection_method}: {fallback_reason}"
+                            f"[{session_id}] 记忆注入格式化失败（保留用户档案）",
+                            exc_info=True,
                         )
+                        memory_str = ""
 
-                    memory_str = format_memories_for_injection(memory_list)
+                if memory_str and profile_text:
+                    injection_text = attach_profile_to_memory_injection(
+                        memory_str, profile_text
+                    )
+                elif memory_str:
+                    injection_text = memory_str
+                elif profile_text:
+                    injection_text = format_profile_block_for_injection(profile_text)
+                else:
+                    injection_text = ""
 
-                    # 唯一注入方式（add-only）：将记忆作为临时片段追加到
+                if injection_text:
+                    # 唯一注入方式（add-only）：将记忆/档案作为临时片段追加到
                     # 当前用户消息末尾。mark_as_temp 标记的 part 由 AstrBot
                     # 在保存对话历史时过滤，注入不会写入 AstrBot 的历史，
-                    # 也不影响前缀缓存。
+                    # 也不影响前缀缓存；档案与记忆共用同一对定界标记，
+                    # 因此现有上下文清理逻辑可以整体移除该片段。
                     req.extra_user_content_parts.append(
-                        TextPart(text=memory_str).mark_as_temp()
+                        TextPart(text=injection_text).mark_as_temp()
                     )
-                    logger.info(
+                    self._record_injected_trace(
+                        request_trace, recalled_memories, memory_str
+                    )
+                    logger.debug(
                         f"[{session_id}] 成功向用户消息末尾注入 "
-                        f"{len(recalled_memories)} 条记忆"
+                        f"{len(recalled_memories) if recalled_memories else 0} 条记忆"
+                        f"；用户档案={'有' if profile_text else '无'}"
                     )
                 else:
-                    logger.info(f"[{session_id}] 未找到相关记忆")
+                    self._record_trace_note(request_trace, "no_results")
+                    logger.debug(f"[{session_id}] 未找到相关记忆或用户档案")
 
         except asyncio.CancelledError:
             raise
         except Exception as e:
             logger.error(f"处理 on_llm_request 钩子时发生错误: {e}", exc_info=True)
+
+    @staticmethod
+    def _get_profile_manager(memory_engine):
+        """返回真实 ProfileManager；Mock/测试替身返回 None。"""
+        from ..managers.profile_manager import ProfileManager
+
+        manager = getattr(memory_engine, "profile_manager", None)
+        return manager if isinstance(manager, ProfileManager) else None
+
+    async def _load_profile_injection_text(self, scope, persona_id) -> str:
+        """读取当前 scope+persona 的用户档案并渲染为注入文本。
+
+        Args:
+            scope: 解析后的记忆作用域。
+            persona_id: 人格 ID（未启用人格过滤时为 None）。
+
+        Returns:
+            紧凑档案文本；无档案/未启用/读取失败时返回空字符串。
+        """
+        manager = self._get_profile_manager(self.memory_engine)
+        if manager is None or not manager.enabled:
+            return ""
+        try:
+            profile = await manager.get_profile(scope, persona_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("读取用户档案失败（跳过档案注入）", exc_info=True)
+            return ""
+        if not profile:
+            return ""
+        return format_profile_for_injection(
+            profile.get("profile"), max_chars=manager.max_chars
+        )
+
+    def _record_injected_trace(self, request_trace, memories, injected_text) -> None:
+        """把最终注入的记忆条数/字符数写回本次召回的 trace。"""
+        recorder = getattr(self.memory_engine, "trace_recorder", None)
+        trace_id = getattr(request_trace, "trace_id", None)
+        if recorder is None or not trace_id:
+            return
+        injected = [
+            {
+                "doc_id": getattr(memory, "doc_id", None),
+                "score": getattr(memory, "final_score", None),
+                "chars": len(str(getattr(memory, "content", "") or "")),
+            }
+            for memory in memories
+        ]
+        recorder.update_injected(trace_id, injected, len(injected_text or ""))
+
+    def _record_trace_note(self, request_trace, note: str) -> None:
+        """给本次召回的 trace 追加一条说明（无结果/未就绪等）。"""
+        recorder = getattr(self.memory_engine, "trace_recorder", None)
+        trace_id = getattr(request_trace, "trace_id", None)
+        if recorder is not None and trace_id:
+            recorder.add_note(trace_id, note)
 
     def _remove_agent_recall_policy_from_context(self, req: ProviderRequest) -> int:
         """移除本插件上一轮注入的自主回忆规则临时片段（重复钩子去重）。
@@ -391,7 +473,7 @@ class MemoryRecall:
     def _load_agent_recall_policy(self) -> str | None:
         """按 自定义覆盖 > 内置默认文件 顺序读取自主回忆规则。"""
         try:
-            from ..prompts import get_prompt_manager
+            from ..prompts.prompt_manager import get_prompt_manager
 
             manager = get_prompt_manager()
             if manager is not None:
@@ -534,6 +616,7 @@ class MemoryRecall:
     ) -> int:
         """从请求上下文中移除临时注入的记忆片段"""
         import re
+
         from ..base.constants import MEMORY_INJECTION_FOOTER, MEMORY_INJECTION_HEADER
 
         removed = 0

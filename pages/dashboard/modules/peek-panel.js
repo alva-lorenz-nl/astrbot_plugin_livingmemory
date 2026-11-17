@@ -13,7 +13,10 @@ import {
   nodeBadge,
   metaItem,
   originLabel,
-  confirmDiscardChanges
+  showToast,
+  captureFormSnapshot,
+  hasFormChanges,
+  canDiscardChanges
 } from "./utils.js";
 
 // Cached details use the UI's 0-10 scale; converting a low display score again
@@ -32,6 +35,9 @@ export class PeekPanel {
     this._batchEditResolve = null;
     this._detailGeneration = 0;
     this._prevPeekContent = null;
+    this._previousFocus = null;
+    this._trapBound = false;
+    this._confirmPreviousFocus = null;
   }
 
   /**
@@ -41,6 +47,9 @@ export class PeekPanel {
    */
   open(isWide = false, withOverlay = true) {
     const panel = document.getElementById("peek-panel");
+    if (!panel.classList.contains("visible")) {
+      this._previousFocus = document.activeElement || null;
+    }
     panel.removeAttribute("inert");
     panel.setAttribute("aria-hidden", "false");
     panel.classList.add("visible");
@@ -51,6 +60,36 @@ export class PeekPanel {
     }
     if (withOverlay) {
       document.getElementById("peek-overlay").classList.add("visible");
+    }
+    if (!this._trapBound && typeof panel.addEventListener === "function") {
+      panel.addEventListener("keydown", (event) => this._trapFocus(event));
+      this._trapBound = true;
+    }
+    const closeButton = document.getElementById("peek-close");
+    if (closeButton && typeof closeButton.focus === "function") {
+      closeButton.focus({ preventScroll: true });
+    }
+  }
+
+  /** 把 Tab 焦点限制在打开的面板内，避免跑到背后的页面。 */
+  _trapFocus(event) {
+    if (!event || event.key !== "Tab") return;
+    const panel = document.getElementById("peek-panel");
+    if (!panel || typeof panel.querySelectorAll !== "function") return;
+    const focusable = Array.from(
+      panel.querySelectorAll(
+        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+      )
+    ).filter((element) => !element.disabled && element.getAttribute?.("aria-hidden") !== "true");
+    if (!focusable.length) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
     }
   }
 
@@ -77,20 +116,18 @@ export class PeekPanel {
     this.state._nodeDetailCache = null;
     // 使在途详情请求失效，防止面板关闭后被慢响应重新打开
     this._detailGeneration++;
+    const previous = this._previousFocus;
+    this._previousFocus = null;
+    if (previous && typeof previous.focus === "function") previous.focus();
   }
 
   hasUnsavedChanges() {
     if (!this.state.isEditing) return false;
-    const values = Array.from(document.querySelectorAll("#peek-body input, #peek-body textarea, #peek-body select"), input => input.value);
-    return JSON.stringify(values) !== this._editSnapshot;
+    return hasFormChanges("#peek-body input, #peek-body textarea, #peek-body select", this._editSnapshot);
   }
 
-  async canDiscard() {
-    if (this._saving) {
-      this.showToast(window.t("flow.waitForSave"));
-      return false;
-    }
-    return !this.hasUnsavedChanges() || await confirmDiscardChanges();
+  canDiscard() {
+    return canDiscardChanges(this._saving, this.hasUnsavedChanges());
   }
 
   async requestClose() {
@@ -151,7 +188,7 @@ export class PeekPanel {
       detail = await this.api.get("memories/detail", { memory_id: memoryId });
       if (generation !== this._detailGeneration) return;
     } catch {
-      this.showToast(window.t("detail.loadFailed"), true);
+      showToast(window.t("detail.loadFailed"), true);
       detail = null;
     }
     if (generation !== this._detailGeneration) return;
@@ -276,7 +313,7 @@ export class PeekPanel {
       html += '<span class="peek-section-title">' + window.t("detail.graphContext") + '</span>';
       html += '<button type="button" class="btn btn-sm btn-secondary" id="peek-focus-graph-btn">' + window.t("graph.focusOnGraph") + '</button>';
       html += '</div>';
-      html += '<canvas id="peek-mini-graph" class="memory-detail-mini-graph" width="440" height="160" data-memory-id="' + id + '"></canvas></div>';
+      html += '</div>';
     }
 
     // 元数据网格
@@ -345,12 +382,6 @@ export class PeekPanel {
         if (window.lmFocusMemoryOnGraph) window.lmFocusMemoryOnGraph(id);
       });
     }
-
-    // 加载图谱小视图
-    const miniCanvas = document.getElementById("peek-mini-graph");
-    if (miniCanvas && graphCtx && graphCtx.nodes && graphCtx.nodes.length) {
-      this.loadMiniGraph(miniCanvas, graphCtx.nodes, graphCtx.edges);
-    }
   }
 
   async resummarizeMemory(memoryId) {
@@ -360,13 +391,13 @@ export class PeekPanel {
         { memory_id: Number(memoryId) },
         { retries: 0 }
       );
-      this.showToast(window.t("detail.resummarizeSuccess", result.new_memory_id));
+      showToast(window.t("detail.resummarizeSuccess", result.new_memory_id));
       if (window.lmRefreshMemories) {
         await window.lmRefreshMemories();
       }
       await this.renderMemory({ memory_id: result.new_memory_id });
     } catch (error) {
-      this.showToast(error.message || window.t("detail.resummarizeFailed"), true);
+      showToast(error.message || window.t("detail.resummarizeFailed"), true);
     }
   }
 
@@ -454,9 +485,7 @@ export class PeekPanel {
     if (cancelBtn) cancelBtn.addEventListener("click", async () => {
       if (await this.canDiscard()) this.renderDetailView(detail);
     });
-    this._editSnapshot = JSON.stringify(Array.from(
-      document.querySelectorAll("#peek-body input, #peek-body textarea, #peek-body select"), input => input.value
-    ));
+    this._editSnapshot = captureFormSnapshot("#peek-body input, #peek-body textarea, #peek-body select");
   }
 
   /**
@@ -489,7 +518,7 @@ export class PeekPanel {
 
     try {
       if (!newContent) {
-        this.showToast(window.t("detail.contentRequired"), true);
+        showToast(window.t("detail.contentRequired"), true);
         return;
       }
 
@@ -552,7 +581,7 @@ export class PeekPanel {
         }
       }
 
-      this.showToast(messages.length ? messages.join("; ") : window.t("detail.noChanges"));
+      showToast(messages.length ? messages.join("; ") : window.t("detail.noChanges"));
       this.close();
 
       // 通知刷新记忆列表（通过全局回调）
@@ -560,7 +589,7 @@ export class PeekPanel {
         await window.lmRefreshMemories();
       }
     } catch (e) {
-      this.showToast(e.message || window.t("edit.updateFailed"), true);
+      showToast(e.message || window.t("edit.updateFailed"), true);
     } finally {
       this._saving = false;
       editBody.inert = false;
@@ -582,7 +611,7 @@ export class PeekPanel {
 
     try {
       await this.api.post("memories/batch-delete", { memory_ids: [id] });
-      this.showToast(window.t("memory.deleted"));
+      showToast(window.t("memory.deleted"));
       this.close();
 
       // 通知刷新记忆列表
@@ -590,7 +619,7 @@ export class PeekPanel {
         await window.lmRefreshMemories();
       }
     } catch (e) {
-      this.showToast(e.message || window.t("memory.deleteFailed"), true);
+      showToast(e.message || window.t("memory.deleteFailed"), true);
     }
   }
 
@@ -643,21 +672,6 @@ export class PeekPanel {
   }
 
   /**
-   * 加载图谱小视图
-   * @param {HTMLCanvasElement} canvas - Canvas 元素
-   * @param {Array} nodes - 节点列表
-   * @param {Array} edges - 边列表
-   */
-  loadMiniGraph(canvas, nodes, edges) {
-    if (!canvas || !nodes || !nodes.length) return;
-
-    // 调用全局的图谱绘制函数（如果存在）
-    if (window.lmDrawMiniGraph) {
-      window.lmDrawMiniGraph(canvas, nodes, edges);
-    }
-  }
-
-  /**
    * 显示确认对话框
    * @param {string} title - 标题
    * @param {string} message - 消息
@@ -669,7 +683,8 @@ export class PeekPanel {
       this._confirmResolve = resolve;
       this._prevPeekContent = document.getElementById("peek-body").innerHTML;
 
-      let html = '<div class="confirm-dialog">';
+      this._confirmPreviousFocus = document.activeElement || null;
+      let html = '<div class="confirm-dialog" role="dialog" aria-modal="true" aria-label="' + esc(title) + '">';
       html += '<div class="confirm-dialog-title">' + esc(title) + '</div>';
       html += '<div class="confirm-dialog-message">' + esc(message) + '</div>';
       html += '<div class="confirm-dialog-actions">';
@@ -683,7 +698,10 @@ export class PeekPanel {
       const okBtn = document.getElementById("confirm-ok-btn");
       const cancelBtn = document.getElementById("confirm-cancel-btn");
       if (okBtn) okBtn.addEventListener("click", () => this._closeConfirmDialog(true));
-      if (cancelBtn) cancelBtn.addEventListener("click", () => this._closeConfirmDialog(false));
+      if (cancelBtn) {
+        cancelBtn.addEventListener("click", () => this._closeConfirmDialog(false));
+        cancelBtn.focus();
+      }
     });
   }
 
@@ -708,6 +726,9 @@ export class PeekPanel {
       this._confirmResolve(!!result);
       this._confirmResolve = null;
     }
+    const previous = this._confirmPreviousFocus;
+    this._confirmPreviousFocus = null;
+    if (previous && typeof previous.focus === "function") previous.focus();
   }
 
   /**
@@ -725,7 +746,8 @@ export class PeekPanel {
       this._batchEditResolve = resolve;
       this._prevPeekContent = document.getElementById("peek-body").innerHTML;
 
-      let html = '<div class="confirm-dialog">';
+      this._confirmPreviousFocus = document.activeElement || null;
+      let html = '<div class="confirm-dialog" role="dialog" aria-modal="true" aria-label="' + esc(title) + '">';
       html += '<div class="confirm-dialog-title">' + esc(window.t("batchEdit.title", count)) + '</div>';
       html += '<div class="batch-edit-form">';
       html += '<label class="batch-edit-label" for="batch-edit-field">' + esc(window.t("batchEdit.field")) + '</label>';
@@ -790,7 +812,7 @@ export class PeekPanel {
     const rawValue = valueEl ? String(valueEl.value).trim() : "";
 
     if (!rawValue) {
-      this.showToast(window.t("batchEdit.valueRequired"), true);
+      showToast(window.t("batchEdit.valueRequired"), true);
       return;
     }
 
@@ -799,7 +821,7 @@ export class PeekPanel {
     if (field === "importance") {
       const parsed = Number(rawValue);
       if (!Number.isFinite(parsed) || parsed < 0 || parsed > 10) {
-        this.showToast(window.t("batchEdit.importanceRange"), true);
+        showToast(window.t("batchEdit.importanceRange"), true);
         return;
       }
       value = parsed;
@@ -828,17 +850,6 @@ export class PeekPanel {
     if (this._batchEditResolve) {
       this._batchEditResolve(result);
       this._batchEditResolve = null;
-    }
-  }
-
-  /**
-   * 显示 Toast 提示
-   * @param {string} message - 提示消息
-   * @param {boolean} isError - 是否为错误
-   */
-  showToast(message, isError = false) {
-    if (window.lmShowToast) {
-      window.lmShowToast(message, isError);
     }
   }
 }

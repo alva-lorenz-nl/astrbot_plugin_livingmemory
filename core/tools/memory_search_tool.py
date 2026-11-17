@@ -1,8 +1,6 @@
 """供 Agent 主动调用的长期记忆回忆工具。"""
 
-from ..memory_scope import adapter_access
 import asyncio
-import json
 from dataclasses import field
 from typing import Any
 
@@ -14,17 +12,14 @@ from astrbot.core.agent.tool import FunctionTool, ToolExecResult
 from astrbot.core.astr_agent_context import AstrAgentContext
 
 from ..base.config_manager import ConfigManager
-from ..memory_scope import (
-    conversation_visible,
-    is_event_memory_allowed,
-    resolve_memory_scope,
+from ..memory_scope import adapter_access, resolve_event_memory_access
+from ..retrieval.recall_trace import trace_request_context
+from ..utils import (
+    conversation_fallback_global,
+    conversation_filtering_enabled,
+    get_conversation_id,
 )
-from ..utils import get_conversation_id, get_persona_id
-
-
-def _json_result(data: dict[str, Any]) -> str:
-    """将工具结果稳定序列化为 JSON 文本。"""
-    return json.dumps(data, ensure_ascii=False, default=str)
+from .agentic_recall_common import json_result as _json_result
 
 
 @dataclass
@@ -105,7 +100,10 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
         try:
             event = context.context.event
             with adapter_access(self.config_manager, event):
-                if not is_event_memory_allowed(self.config_manager, event):
+                access = await resolve_event_memory_access(
+                    self.config_manager, self.context, event
+                )
+                if not access.allowed:
                     return _json_result(
                         {
                             "query": cleaned_query,
@@ -114,18 +112,7 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
                             "error": "memory access is not allowed",
                         }
                     )
-                filtering_config = self.config_manager.filtering_settings
-                use_persona_filtering = filtering_config.get(
-                    "use_persona_filtering", True
-                )
-
-                persona_id = (
-                    await get_persona_id(self.context, event)
-                    if use_persona_filtering
-                    else None
-                )
-
-                recall_scope = resolve_memory_scope(self.config_manager, event)
+                recall_scope = access.scope
                 recall_session_id = recall_scope
                 # session_filtered 只表示本次查询是否真的按会话隔离：global / user
                 # 作用域跨会话共享，legacy 未启用会话过滤（scope 为 None）也不是会话
@@ -135,7 +122,12 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
                     recall_scope is not None
                     and recall_scope == event.unified_msg_origin
                 )
-                recall_persona_id = persona_id if use_persona_filtering else None
+                recall_persona_id = access.persona_id
+                use_persona_filtering = bool(
+                    self.config_manager.filtering_settings.get(
+                        "use_persona_filtering", True
+                    )
+                )
 
                 default_k = int(self.config_manager.get("recall_engine.top_k", 5))
                 max_k = int(self.config_manager.get("recall_engine.max_k", 10))
@@ -147,37 +139,30 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
 
                 limited_k = max(1, min(requested_k_int, max_k))
 
-                filter_conversation = self.config_manager.get(
-                    "filtering_settings.use_conversation_filtering", False
-                )
-                fallback_global = self.config_manager.get(
-                    "filtering_settings.fallback_to_global_conversations", True
-                )
-                current_cid = (
-                    await get_conversation_id(self.context, event)
-                    if filter_conversation
-                    else None
-                )
-
-                memories = await self.memory_engine.search_memories(
-                    query=cleaned_query,
-                    k=limited_k,
-                    session_id=recall_session_id,
+                channel_scope = access.channel_scope
+                with trace_request_context(
+                    session_id=event.unified_msg_origin,
+                    scope=recall_session_id,
                     persona_id=recall_persona_id,
-                    conversation_id=current_cid,
-                    fallback_to_global_conversations=fallback_global,
-                )
-
-                if filter_conversation:
-                    memories = [
-                        m
-                        for m in memories
-                        if conversation_visible(
-                            getattr(m, "metadata", {}) or {},
-                            current_cid,
-                            fallback_to_global=fallback_global,
-                        )
-                    ]
+                    agentic=True,
+                ) as request_trace:
+                    search_kwargs: dict[str, Any] = {
+                        "query": cleaned_query,
+                        "k": limited_k,
+                        "session_id": recall_session_id,
+                        "persona_id": recall_persona_id,
+                    }
+                    if channel_scope:
+                        search_kwargs["extra_scopes"] = [channel_scope]
+                    # 对话线隔离：只在当前对话线内召回（未标注 cid 的旧记忆按配置放行）
+                    if conversation_filtering_enabled(self.config_manager):
+                        current_cid = await get_conversation_id(self.context, event)
+                        if current_cid:
+                            search_kwargs["conversation_id"] = current_cid
+                            search_kwargs["fallback_to_global_conversations"] = (
+                                conversation_fallback_global(self.config_manager)
+                            )
+                    memories = await self.memory_engine.search_memories(**search_kwargs)
 
                 serialized_results = []
                 for memory in memories:
@@ -202,17 +187,22 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
                             item["source_messages"] = await get_source(memory.doc_id)
                     serialized_results.append(item)
 
-                return _json_result(
-                    {
-                        "query": cleaned_query,
-                        "applied_filters": {
-                            "session_filtered": session_filtered,
-                            "persona_filtered": use_persona_filtering,
-                        },
-                        "count": len(serialized_results),
-                        "results": serialized_results,
-                    }
+                payload = {
+                    "query": cleaned_query,
+                    "applied_filters": {
+                        "session_filtered": session_filtered,
+                        "persona_filtered": use_persona_filtering,
+                        "conversation_filtered": conversation_filtering_enabled(
+                            self.config_manager
+                        ),
+                    },
+                    "count": len(serialized_results),
+                    "results": serialized_results,
+                }
+                self._record_tool_trace(
+                    request_trace, serialized_results, _json_result(payload)
                 )
+                return _json_result(payload)
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -225,3 +215,19 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
                     "error": "internal_error",
                 }
             )
+
+    def _record_tool_trace(self, request_trace, results, output) -> None:
+        """把 agent 工具返回的命中写回本次召回的 trace（agentic=true）。"""
+        recorder = getattr(self.memory_engine, "trace_recorder", None)
+        trace_id = getattr(request_trace, "trace_id", None)
+        if recorder is None or not trace_id:
+            return
+        injected = [
+            {
+                "doc_id": item.get("id"),
+                "score": item.get("score"),
+                "chars": len(str(item.get("content") or "")),
+            }
+            for item in results
+        ]
+        recorder.update_injected(trace_id, injected, len(output or ""))

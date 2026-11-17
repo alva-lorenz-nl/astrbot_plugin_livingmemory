@@ -5,7 +5,6 @@
 import asyncio
 import json
 import random
-import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -13,11 +12,149 @@ from typing import Any
 from astrbot.api import logger
 
 from ..astrbot_compat import get_using_provider
+from ..base.exceptions import LowQualityMemoryError
+from ..base.usage_metrics import record_llm_usage
 from ..models.conversation_models import Message
-from .memory_processor_parse import MemoryProcessorParseMixin
-from .memory_processor_build import MemoryProcessorBuildMixin
+from ..models.memory_atom import MemoryAtom
+from .atom_classifier import classify_atoms
+from .memory_processor_parse import (
+    apply_source_time_tags,
+    build_storage_format,
+    ensure_list,
+    extract_participant_identities,
+    format_conversation,
+    normalize_parsed_data,
+    parse_llm_response,
+    try_fix_json,
+    validate_importance,
+    validate_summary_quality,
+)
 
-class MemoryProcessor(MemoryProcessorParseMixin, MemoryProcessorBuildMixin):
+# 进程内低质量总结拒绝计数（不落盘；用于观察 LLM 输出质量）
+_low_quality_rejections = 0
+
+
+def get_low_quality_rejection_count() -> int:
+    """返回当前进程拒绝写入的低质量总结累计次数。"""
+    return _low_quality_rejections
+
+
+# 瞬时错误类型名标记（httpx/openai/aiohttp 等连接与协议异常）
+_TRANSIENT_ERROR_TYPE_MARKERS = (
+    "timeout",
+    "connect",
+    "network",
+    "transport",
+    "protocol",
+)
+# 瞬时错误消息标记：没有状态码/异常类型可用时兜底匹配
+_TRANSIENT_ERROR_MESSAGE_MARKERS = (
+    "429",
+    "rate limit",
+    "rate_limit",
+    "too many requests",
+    "http 500",
+    "http 502",
+    "http 503",
+    "http 504",
+    "internal server error",
+    "bad gateway",
+    "gateway timeout",
+    "service unavailable",
+    "temporarily unavailable",
+    "overloaded",
+    "timeout",
+    "timed out",
+    "connection",
+    "connect error",
+    "connection reset",
+    "connection refused",
+    "connection aborted",
+    "network error",
+)
+
+
+def _extract_http_status(exc: BaseException) -> int | None:
+    """从异常对象上提取 HTTP 状态码（兼容 httpx/openai/aiohttp 风格）。"""
+    candidates = (
+        getattr(exc, "status_code", None),
+        getattr(getattr(exc, "response", None), "status_code", None),
+        getattr(exc, "status", None),
+        getattr(getattr(exc, "response", None), "status", None),
+    )
+    for value in candidates:
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+    return None
+
+
+def _is_transient_llm_error(exc: BaseException) -> bool:
+    """判断 LLM 调用异常是否为可重试的瞬时错误。
+
+    仅超时、HTTP 429/5xx 与连接类错误可重试；解析失败、校验失败、
+    参数错误等不属于瞬时错误（鉴权失败由 Provider 回退链处理，不重试）。
+    重试只发生在同一个 Provider 内，避免同一错误反复消耗 LLM 调用额度。
+    """
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError, ConnectionError)):
+        return True
+    status = _extract_http_status(exc)
+    if status is not None:
+        return status == 429 or 500 <= status < 600
+    type_names = {cls.__name__.lower() for cls in type(exc).__mro__}
+    if any(
+        marker in type_name
+        for type_name in type_names
+        for marker in _TRANSIENT_ERROR_TYPE_MARKERS
+    ):
+        return True
+    message = str(exc).lower()
+    return any(marker in message for marker in _TRANSIENT_ERROR_MESSAGE_MARKERS)
+
+
+# 与配置默认值保持一致：单个 Provider 单次调用默认超时（秒）。
+DEFAULT_LLM_CALL_TIMEOUT_SECONDS = 60
+
+# 鉴权/权限失败标记：这类错误换一个 Provider 才有意义，不应重试或直接放弃。
+_AUTH_ERROR_MARKERS = (
+    "unauthorized",
+    "unauthorised",
+    "authentication",
+    "invalid api key",
+    "invalid_api_key",
+    "incorrect api key",
+    "permission denied",
+    "forbidden",
+    "access denied",
+    "http 401",
+    "http 403",
+    "status code 401",
+    "status code 403",
+)
+
+
+def _is_auth_llm_error(exc: BaseException) -> bool:
+    """判断异常是否为 Provider 鉴权/权限错误。"""
+    if _extract_http_status(exc) in (401, 403):
+        return True
+    type_names = {cls.__name__.lower() for cls in type(exc).__mro__}
+    if any(
+        "authentication" in name or "permissiondenied" in name for name in type_names
+    ):
+        return True
+    message = str(exc).lower()
+    return any(marker in message for marker in _AUTH_ERROR_MARKERS)
+
+
+def _is_provider_unavailable_error(exc: BaseException) -> bool:
+    """判断异常是否应切换到下一个 Provider。
+
+    超时、HTTP 429/5xx、连接类错误与鉴权失败属于 Provider 级不可用；
+    解析/校验/请求格式等错误换一个模型也无济于事，直接抛出。
+    """
+    return _is_transient_llm_error(exc) or _is_auth_llm_error(exc)
+
+
+class MemoryProcessor:
     """
     记忆处理器
 
@@ -46,9 +183,43 @@ class MemoryProcessor(MemoryProcessorParseMixin, MemoryProcessorBuildMixin):
         self.config = config or {}
         # 记录已确认只接受流式请求的 Provider ID，auto 模式后续直接走流式
         self._stream_only_providers: set[str] = set()
+        # 主 Provider 不可用时按顺序尝试的备用 Provider ID（去重、保序）。
+        self._fallback_provider_ids = self._normalize_provider_ids(
+            self.config.get("llm_fallback_provider_ids")
+        )
+        # 每个 Provider 单次调用的超时（秒），由 asyncio.wait_for 生效。
+        self._llm_call_timeout_seconds = self._normalize_call_timeout(
+            self.config.get("llm_call_timeout_seconds")
+        )
 
         # 加载提示词模板
         self._load_prompts()
+
+    @staticmethod
+    def _normalize_provider_ids(value: Any) -> list[str]:
+        """Normalize fallback provider IDs into a deduplicated ordered list."""
+        if not isinstance(value, list):
+            return []
+        seen: set[str] = set()
+        provider_ids: list[str] = []
+        for item in value:
+            if not isinstance(item, str):
+                continue
+            provider_id = item.strip()
+            if provider_id and provider_id not in seen:
+                seen.add(provider_id)
+                provider_ids.append(provider_id)
+        return provider_ids
+
+    @staticmethod
+    def _normalize_call_timeout(value: Any) -> float:
+        """Normalize the per-call timeout; invalid values fall back to default."""
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return float(DEFAULT_LLM_CALL_TIMEOUT_SECONDS)
+        timeout = float(value)
+        if timeout <= 0:
+            return float(DEFAULT_LLM_CALL_TIMEOUT_SECONDS)
+        return timeout
 
     async def _get_current_llm_provider(self):
         """动态解析LLM Provider以避免持有过期引用
@@ -89,6 +260,86 @@ class MemoryProcessor(MemoryProcessorParseMixin, MemoryProcessorBuildMixin):
 
         return None
 
+    @staticmethod
+    def _provider_label(provider: Any, configured_id: str = "") -> str:
+        """Return the provider id used in logs and usage statistics."""
+        if configured_id:
+            return configured_id
+        provider_config = getattr(provider, "provider_config", None)
+        if isinstance(provider_config, dict):
+            provider_id = provider_config.get("id")
+        else:
+            provider_id = getattr(provider_config, "id", None)
+        return str(provider_id) if provider_id else "default"
+
+    def _resolve_fallback_provider(self, provider_id: str):
+        """Resolve one fallback provider by ID; return None when unavailable."""
+        if not self.context:
+            logger.warning(
+                f"[MemoryProcessor] No context to resolve fallback LLM provider "
+                f"'{provider_id}', skipped"
+            )
+            return None
+        try:
+            provider = self.context.get_provider_by_id(provider_id)
+        except Exception as e:
+            logger.warning(
+                f"[MemoryProcessor] Failed to resolve fallback LLM provider "
+                f"'{provider_id}': {e}"
+            )
+            return None
+        if provider is None or not hasattr(provider, "text_chat"):
+            logger.warning(
+                f"[MemoryProcessor] Fallback LLM provider '{provider_id}' is "
+                f"missing or not a chat provider, skipped"
+            )
+            return None
+        return provider
+
+    async def _resolve_llm_provider_chain(self) -> list[tuple[str, Any]]:
+        """Resolve providers in order: primary first, then configured fallbacks.
+
+        Unresolvable fallback IDs are logged and skipped; the same provider is
+        never added twice. An empty chain means no provider is available.
+        """
+        chain: list[tuple[str, Any]] = []
+        seen_ids: set[str] = set()
+        seen_objects: set[int] = set()
+
+        primary = await self._get_current_llm_provider()
+        if primary is not None:
+            configured_id = (
+                self._llm_provider if isinstance(self._llm_provider, str) else ""
+            )
+            label = self._provider_label(primary, configured_id)
+            chain.append((label, primary))
+            seen_ids.add(label)
+            seen_objects.add(id(primary))
+        elif self._fallback_provider_ids:
+            logger.warning(
+                "[MemoryProcessor] Primary LLM provider is unavailable, trying "
+                f"fallback providers: {self._fallback_provider_ids}"
+            )
+
+        for provider_id in self._fallback_provider_ids:
+            if provider_id in seen_ids:
+                continue
+            provider = self._resolve_fallback_provider(provider_id)
+            if provider is None:
+                continue
+            label = self._provider_label(provider, provider_id)
+            if label in seen_ids or id(provider) in seen_objects:
+                logger.warning(
+                    f"[MemoryProcessor] Fallback LLM provider '{provider_id}' "
+                    f"duplicates an earlier provider, skipped"
+                )
+                continue
+            chain.append((label, provider))
+            seen_ids.add(label)
+            seen_objects.add(id(provider))
+
+        return chain
+
     def _load_prompts(self) -> None:
         """从 PromptManager 加载提示词模板（支持用户自定义覆盖）"""
         try:
@@ -112,7 +363,9 @@ class MemoryProcessor(MemoryProcessorParseMixin, MemoryProcessorBuildMixin):
 
             mgr = get_prompt_manager()
             if mgr is not None:
-                prompt_id = "group_chat_prompt" if is_group_chat else "private_chat_prompt"
+                prompt_id = (
+                    "group_chat_prompt" if is_group_chat else "private_chat_prompt"
+                )
                 return mgr.get_prompt(prompt_id)
         except Exception:
             pass
@@ -283,57 +536,127 @@ class MemoryProcessor(MemoryProcessorParseMixin, MemoryProcessorBuildMixin):
         )
 
     async def _call_llm_with_retry(
-        self, prompt: str, system_prompt: str, max_retries: int = 3
+        self, prompt: str, system_prompt: str, max_retries: int = 2
     ) -> str:
-        """
-        带指数退避的 LLM 调用
+        """Call the LLM with provider fallback, per-provider retry and timeout.
 
-        按配置 `llm_stream_mode` 选择调用方式（issue #265）：
-        `never` 始终非流式（旧行为），`always` 始终流式，`auto` 优先非流式，
-        遇到"不支持非流式请求"错误时自动改用流式并记住该 Provider。
+        Providers are tried in order: the configured/primary provider first,
+        then ``llm_fallback_provider_ids``. Inside one provider only transient
+        errors (timeout, HTTP 429/5xx, connection errors) are retried once;
+        authentication failures or exhausted retries switch to the next
+        provider. Parsing/validation/request-format errors are raised directly
+        because another model would fail the same way.
+
+        Streaming is selected by ``llm_stream_mode`` (issue #265): ``never``
+        always uses non-streaming, ``always`` always streams, ``auto`` prefers
+        non-streaming and remembers stream-only providers per provider id.
 
         Args:
-            prompt: 提示词
-            system_prompt: 系统提示词
-            max_retries: 最大重试次数
+            prompt: Prompt text.
+            system_prompt: System prompt text.
+            max_retries: Maximum attempts inside one provider (first call
+                included), default 2.
 
         Returns:
-            LLM 响应文本
+            LLM response text.
 
         Raises:
-            RuntimeError: Provider 不可用，或流式调用未返回完整结果
+            RuntimeError: No provider is available, or the streaming response
+                is incomplete.
+            Exception: The last provider error when every provider fails.
         """
-        # 未知取值（含配置缺失）安全回退为 auto
+        # Unknown/missing values fall back to auto.
         stream_mode = self.config.get("llm_stream_mode", "auto")
         if stream_mode not in ("auto", "always", "never"):
             stream_mode = "auto"
 
-        last_error = None
+        chain = await self._resolve_llm_provider_chain()
+        if not chain:
+            raise RuntimeError("LLM Provider 不可用")
+
+        tried: list[str] = []
+        last_error: BaseException | None = None
+        for index, (provider_id, provider) in enumerate(chain):
+            fallback_used = index > 0
+            try:
+                return await self._call_provider_with_retry(
+                    provider=provider,
+                    provider_id=provider_id,
+                    fallback_used=fallback_used,
+                    prompt=prompt,
+                    system_prompt=system_prompt,
+                    stream_mode=stream_mode,
+                    max_retries=max_retries,
+                )
+            except Exception as exc:
+                if not _is_provider_unavailable_error(exc):
+                    # Parse/validation/request-format errors are model-agnostic.
+                    raise
+                last_error = exc
+                tried.append(f"{provider_id} ({type(exc).__name__})")
+                if index + 1 < len(chain):
+                    logger.warning(
+                        f"[MemoryProcessor] LLM provider '{provider_id}' failed "
+                        f"({type(exc).__name__}: {exc}); falling back to "
+                        f"'{chain[index + 1][0]}' (tried: {', '.join(tried)})"
+                    )
+                else:
+                    logger.error(
+                        f"[MemoryProcessor] All LLM providers failed; last error "
+                        f"from '{provider_id}' ({type(exc).__name__}: {exc}); "
+                        f"tried: {', '.join(tried)}"
+                    )
+
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("LLM Provider 不可用")
+
+    async def _call_provider_with_retry(
+        self,
+        *,
+        provider: Any,
+        provider_id: str,
+        fallback_used: bool,
+        prompt: str,
+        system_prompt: str,
+        stream_mode: str,
+        max_retries: int,
+    ) -> str:
+        """Call one provider with the existing transient-error retry policy."""
+        provider_config = getattr(provider, "provider_config", None)
+        provider_key = (
+            str(provider_config.get("id", "default"))
+            if isinstance(provider_config, dict)
+            else str(id(provider))
+        )
+
+        last_error: BaseException | None = None
         for attempt in range(max_retries):
             try:
-                provider = await self._get_current_llm_provider()
-                if not provider:
-                    raise RuntimeError("LLM Provider 不可用")
-
-                # 用 Provider ID 记住只接受流式的 Provider
-                provider_config = getattr(provider, "provider_config", None)
-                provider_key = (
-                    str(provider_config.get("id", "default"))
-                    if isinstance(provider_config, dict)
-                    else str(id(provider))
-                )
                 use_stream = stream_mode == "always" or (
                     stream_mode == "auto"
                     and provider_key in self._stream_only_providers
                 )
                 if not use_stream:
                     try:
-                        response = await provider.text_chat(
-                            prompt=prompt, system_prompt=system_prompt
+                        response = await asyncio.wait_for(
+                            provider.text_chat(
+                                prompt=prompt, system_prompt=system_prompt
+                            ),
+                            timeout=self._llm_call_timeout_seconds,
                         )
-                        return response.completion_text
+                        completion_text = response.completion_text
+                        record_llm_usage(
+                            getattr(response, "usage", None),
+                            prompt_text=prompt,
+                            completion_text=completion_text or "",
+                            provider_id=provider_id,
+                            fallback_used=fallback_used,
+                        )
+                        return completion_text
                     except Exception as e:
-                        # 仅当错误明确表示"不支持非流式"时才降级到流式
+                        # Only a clear "non-stream unsupported" error downgrades
+                        # to streaming; other errors keep the normal retry path.
                         message = str(e).lower()
                         if stream_mode != "auto" or (
                             "non-stream" not in message and "non_stream" not in message
@@ -341,96 +664,55 @@ class MemoryProcessor(MemoryProcessorParseMixin, MemoryProcessorBuildMixin):
                             raise
                         self._stream_only_providers.add(provider_key)
                         logger.warning(
-                            "[MemoryProcessor] Provider 不支持非流式请求，"
-                            f"本次自动改用流式调用: {e}"
+                            "[MemoryProcessor] Provider does not support "
+                            f"non-stream requests, switching to streaming: {e}"
                         )
 
-                # 流式接口逐块返回 is_chunk=True 的增量，最后返回一次
-                # is_chunk=False 的完整响应；只有完整响应才可作为结果。
-                # 中断、超时或缺少完整响应时按失败处理，避免写入不完整记忆。
-                completion_text = None
-                async for chunk in provider.text_chat_stream(
-                    prompt=prompt, system_prompt=system_prompt
-                ):
-                    if not getattr(chunk, "is_chunk", True) and chunk.completion_text:
-                        completion_text = chunk.completion_text
+                # Streaming: only a complete response (is_chunk=False) counts.
+                completion_text, final_usage = await asyncio.wait_for(
+                    self._collect_stream_response(provider, prompt, system_prompt),
+                    timeout=self._llm_call_timeout_seconds,
+                )
                 if not completion_text:
                     raise RuntimeError("流式调用未返回完整响应，已按失败处理")
+                record_llm_usage(
+                    final_usage,
+                    prompt_text=prompt,
+                    completion_text=completion_text,
+                    provider_id=provider_id,
+                    fallback_used=fallback_used,
+                )
                 return completion_text
             except Exception as e:
                 last_error = e
-                if attempt == max_retries - 1:
+                if not _is_transient_llm_error(e) or attempt == max_retries - 1:
                     raise
                 wait_time = (2**attempt) + random.uniform(0, 1)
                 logger.warning(
-                    f"[MemoryProcessor] LLM 调用失败，{wait_time:.1f}s 后重试 "
-                    f"({attempt + 1}/{max_retries}): {e}"
+                    f"[MemoryProcessor] LLM call hit a transient error, retrying "
+                    f"in {wait_time:.1f}s ({attempt + 1}/{max_retries}): {e}"
                 )
                 await asyncio.sleep(wait_time)
         if last_error:
             raise last_error
         raise RuntimeError("LLM 调用失败，未捕获到具体异常")
 
-    def _try_fix_json(self, text: str) -> str:
-        """
-        尝试修复损坏的 JSON 字符串
+    @staticmethod
+    async def _collect_stream_response(
+        provider: Any, prompt: str, system_prompt: str
+    ) -> tuple[str | None, Any]:
+        """Consume a streaming response and return complete text plus usage."""
+        completion_text = None
+        final_usage = None
+        async for chunk in provider.text_chat_stream(
+            prompt=prompt, system_prompt=system_prompt
+        ):
+            if not getattr(chunk, "is_chunk", True) and chunk.completion_text:
+                completion_text = chunk.completion_text
+                final_usage = getattr(chunk, "usage", None)
+        return completion_text, final_usage
 
-        Args:
-            text: 可能损坏的 JSON 字符串
-
-        Returns:
-            修复后的 JSON 字符串
-        """
-        fixed = text.strip()
-
-        # 移除 markdown 代码块标记
-        if fixed.startswith("```json"):
-            fixed = fixed[7:]
-        elif fixed.startswith("```"):
-            fixed = fixed[3:]
-        if fixed.endswith("```"):
-            fixed = fixed[:-3]
-        fixed = fixed.strip()
-
-        # 按 JSON 字符串边界修复，保留字段之间合法的换行/缩进以及字符串中的括号。
-        result: list[str] = []
-        closing: list[str] = []
-        in_string = False
-        escaped = False
-        for index, char in enumerate(fixed):
-            if in_string:
-                if ord(char) < 0x20:
-                    # 非法的裸控制字符仅在字符串内转义。
-                    if escaped:
-                        result.append("\\")
-                    result.append(json.dumps(char)[1:-1])
-                    escaped = False
-                    continue
-                result.append(char)
-                if escaped:
-                    escaped = False
-                elif char == "\\":
-                    escaped = True
-                elif char == '"':
-                    in_string = False
-                continue
-
-            if char == '"':
-                in_string = True
-            elif char in "[{":
-                closing.append("]" if char == "[" else "}")
-            elif char in "]}" and closing and closing[-1] == char:
-                closing.pop()
-            elif char == "," and fixed[index + 1:].lstrip().startswith(("]", "}")):
-                continue
-            result.append(char)
-
-        if in_string:
-            if escaped:
-                result.append("\\")
-            result.append('"')
-        result.extend(reversed(closing))
-        return "".join(result)
+    _try_fix_json = staticmethod(try_fix_json)
 
     async def process_conversation(
         self,
@@ -453,7 +735,10 @@ class MemoryProcessor(MemoryProcessorParseMixin, MemoryProcessorBuildMixin):
                 - importance: 重要性评分(0-1)
 
         Raises:
-            Exception: 处理失败时抛出异常
+            ValueError: 消息列表为空。
+            MemoryParseError: LLM 响应无法解析为结构化记忆（调用方应重试，不落库）。
+            LowQualityMemoryError: 总结质量不达标（调用方应重试，不落库）。
+            Exception: 其他 LLM 调用或处理失败。
         """
         if not messages:
             raise ValueError("消息列表不能为空")
@@ -464,9 +749,11 @@ class MemoryProcessor(MemoryProcessorParseMixin, MemoryProcessorBuildMixin):
         # 2. 选择合适的提示词模板（每次从 PromptManager 读取，确保 WebUI 保存后立即生效）
         # 使用 replace 而非 format，避免对话内容中的大括号导致解析错误
         current_date = datetime.now().strftime("%Y-%m-%d %H:%M")
-        prompt = self._get_chat_prompt(is_group_chat).replace(
-            "{conversation}", conversation_text
-        ).replace("{current_date}", current_date)
+        prompt = (
+            self._get_chat_prompt(is_group_chat)
+            .replace("{conversation}", conversation_text)
+            .replace("{current_date}", current_date)
+        )
 
         # 3. 调用LLM生成结构化记忆
         conversation_type = "群聊" if is_group_chat else "私聊"
@@ -494,13 +781,21 @@ class MemoryProcessor(MemoryProcessorParseMixin, MemoryProcessorBuildMixin):
             logger.debug(f"[MemoryProcessor] LLM 原始响应内容:\n{llm_response_text}")
 
             # 4. 解析LLM响应
-            structured_data = self._parse_llm_response(llm_response_text, is_group_chat)
+            structured_data = parse_llm_response(llm_response_text, is_group_chat)
 
-            # 4.5 质量校验
+            # 4.5 质量校验：低质量总结默认不写入主库，由调用方按可重试失败处理
             quality = self._validate_summary_quality(structured_data)
             if quality == "low":
+                global _low_quality_rejections
+                _low_quality_rejections += 1
                 logger.warning(
-                    "[MemoryProcessor] 总结质量不达标（low），将标记但仍写入"
+                    "[MemoryProcessor] 总结质量不达标（low），拒绝写入主库: "
+                    f"summary={(structured_data.get('summary') or '')[:60]!r}, "
+                    f"key_facts={len(structured_data.get('key_facts') or [])}, "
+                    f"rejected_total={_low_quality_rejections}"
+                )
+                raise LowQualityMemoryError(
+                    "总结质量不达标（summary/key_facts/importance 校验失败）"
                 )
             structured_data["_quality"] = quality
 
@@ -516,7 +811,12 @@ class MemoryProcessor(MemoryProcessorParseMixin, MemoryProcessorBuildMixin):
             metadata["participant_identities"] = self._extract_participant_identities(
                 messages
             )
-            content = self._apply_source_time_tags(content, metadata, messages)
+            content = apply_source_time_tags(
+                content,
+                metadata,
+                messages,
+                self.config.get("include_source_time_tags", True),
+            )
             # 将质量标记写入 metadata
             metadata["summary_quality"] = structured_data.get("_quality", "normal")
 
@@ -538,33 +838,6 @@ class MemoryProcessor(MemoryProcessorParseMixin, MemoryProcessorBuildMixin):
             # 不再降级处理，直接向上抛出异常，由调用方处理重试逻辑
             raise
 
-    def _apply_source_time_tags(
-        self,
-        content: str,
-        metadata: dict[str, Any],
-        messages: list[Message],
-    ) -> str:
-        """Attach source dates without asking the LLM to infer them."""
-        if not self.config.get("include_source_time_tags", True) or not messages:
-            return content
-
-        timestamps = sorted(float(message.timestamp) for message in messages)
-        start = datetime.fromtimestamp(timestamps[0]).astimezone()
-        end = datetime.fromtimestamp(timestamps[-1]).astimezone()
-        dates = sorted(
-            {
-                datetime.fromtimestamp(value).strftime("%Y-%m-%d")
-                for value in timestamps
-            }
-        )
-        label = dates[0] if len(dates) == 1 else f"{dates[0]} - {dates[-1]}"
-
-        metadata["time_tags"] = dates
-        metadata["source_time_start"] = start.isoformat()
-        metadata["source_time_end"] = end.isoformat()
-        metadata["source_time_label"] = label
-        return content
-
     def _format_conversation(self, messages: list[Message]) -> str:
         """
         格式化对话历史为文本
@@ -575,77 +848,171 @@ class MemoryProcessor(MemoryProcessorParseMixin, MemoryProcessorBuildMixin):
         Returns:
             格式化后的对话文本
         """
-
-        formatted_lines = []
-        for i, msg in enumerate(messages):
-            logger.debug(
-                f"[_format_conversation] 消息#{i}: "
-                f"sender_id={msg.sender_id}, sender_name={msg.sender_name}, "
-                f"role={msg.role}, group_id={msg.group_id}"
-            )
-
-            content_text = self._message_content_to_text(msg.content)
-            sender_info = self._format_sender_info(msg)
-            formatted_line = f"{sender_info} {content_text}".rstrip()
-            formatted_lines.append(formatted_line)
-            if msg.group_id:
-                logger.debug(
-                    f"[_format_conversation] 消息#{i} 格式化结果(群聊): {formatted_line[:100]}..."
-                )
-            else:
-                logger.debug(
-                    f"[_format_conversation] 消息#{i} 格式化结果(私聊): {sender_info[:50]}..."
-                )
-        return "\n".join(formatted_lines)
+        return format_conversation(messages)
 
     @staticmethod
     def _extract_participant_identities(
         messages: list[Message],
     ) -> list[dict[str, Any]]:
         """Build stable graph identities from message sender IDs, not LLM names."""
-        identities: dict[str, dict[str, Any]] = {}
-        for message in messages:
-            if message.role == "system":
-                continue
-            sender_id = str(message.sender_id or "").strip()
-            if not sender_id:
-                continue
-            platform = str(message.platform or "unknown").strip().lower() or "unknown"
-            identity_key = f"{platform}:{sender_id}"
-            display_name = str(message.sender_name or sender_id).strip() or sender_id
-            is_bot = bool(
-                message.metadata.get("is_bot_message", False)
-                or message.role == "assistant"
-            )
+        return extract_participant_identities(messages)
 
-            identity = identities.setdefault(
-                identity_key,
-                {
-                    "identity_key": identity_key,
-                    "sender_id": sender_id,
-                    "platform": platform,
-                    "display_name": display_name,
-                    "aliases": [],
-                    "is_bot": is_bot,
-                },
-            )
-            identity["display_name"] = display_name
-            identity["is_bot"] = bool(identity["is_bot"] or is_bot)
-            if display_name not in identity["aliases"]:
-                identity["aliases"].append(display_name)
+    def _build_storage_format(
+        self,
+        fallback_excerpt: str,
+        structured_data: dict[str, Any],
+        is_group_chat: bool,
+    ) -> tuple[str, dict[str, Any]]:
+        """
+        构建存储格式
 
-        return list(identities.values())
+        Args:
+            fallback_excerpt: 当摘要为空时使用的对话摘录
+            structured_data: 结构化数据
+            is_group_chat: 是否为群聊
+
+        Returns:
+            (content, metadata) 元组
+        """
+        return build_storage_format(fallback_excerpt, structured_data, is_group_chat)
 
     @staticmethod
-    def _format_sender_info(msg: Message) -> str:
-        time_str = datetime.fromtimestamp(msg.timestamp).strftime("%Y-%m-%d %H:%M:%S")
-        display_name = msg.sender_name if msg.sender_name else msg.sender_id or "未知"
-        is_bot = msg.metadata.get("is_bot_message", False) or msg.role == "assistant"
-        if is_bot:
-            return f"[Bot: {display_name} | ID: {msg.sender_id} | {time_str}]"
-        return f"[{display_name} | ID: {msg.sender_id} | {time_str}]"
+    def _validate_summary_quality(structured_data: dict[str, Any]) -> str:
+        """校验总结质量，返回 "normal" 或 "low"。"""
+        return validate_summary_quality(structured_data)
 
-    @classmethod
-    def _message_content_to_text(cls, content: Any) -> str:
-        return Message.content_to_text(content)
+    def build_memory_from_structured_data(
+        self,
+        structured_data: dict[str, Any],
+        is_group_chat: bool = False,
+        fallback_excerpt: str = "",
+    ) -> tuple[str, dict[str, Any], float]:
+        """复用自动总结流程，将结构化数据转换为标准记忆存储格式。"""
+        # 与自动总结路径保持一致：先校验质量，再规范化。
+        # 这样原始 importance 越界等异常仍会被判为 low quality。
+        quality = self._validate_summary_quality(structured_data)
+        normalized = normalize_parsed_data(structured_data, is_group_chat)
+        normalized["_quality"] = quality
 
+        content, metadata = self._build_storage_format(
+            fallback_excerpt or normalized.get("summary", ""),
+            normalized,
+            is_group_chat,
+        )
+        metadata["summary_quality"] = quality
+        return (
+            content,
+            metadata,
+            validate_importance(normalized.get("importance")),
+        )
+
+    def classify_atoms_from_metadata(
+        self,
+        metadata: dict[str, Any],
+        parent_importance: float = 0.5,
+        session_id: str | None = None,
+        persona_id: str | None = None,
+    ) -> list[MemoryAtom]:
+        """Generate time-aware memory atoms from key_facts in metadata.
+
+        This is a post-processing step after process_conversation().
+        It does NOT make additional LLM calls — classification is rule-based.
+        """
+        if not self.config.get("atom_enabled", True):
+            return []
+        key_facts: list[str] = metadata.get("key_facts", [])
+        if not key_facts:
+            return []
+        topics = metadata.get("topics", [])
+        participants = metadata.get("participants", [])
+        atoms = classify_atoms(
+            key_facts=key_facts,
+            topics=topics,
+            participants=participants,
+            parent_importance=parent_importance,
+            session_id=session_id,
+            persona_id=persona_id,
+        )
+        metadata["atom_types"] = sorted({atom.atom_type.value for atom in atoms})
+        return atoms
+
+    async def merge_memories(self, memories: list[dict]) -> dict[str, Any]:
+        """把一组零散记忆合并为一条精炼记忆（供记忆库整合使用）。
+
+        Args:
+            memories: 待合并的记忆列表，每条为 {"content": str, "metadata": dict}。
+
+        Returns:
+            包含 summary/key_facts/topics/importance 的字典。
+
+        Raises:
+            RuntimeError: LLM 不可用或解析失败时抛出。
+        """
+        items: list[dict[str, Any]] = []
+        for i, mem in enumerate(memories, 1):
+            metadata = mem.get("metadata") or {}
+            summary = str(
+                metadata.get("persona_summary") or str(mem.get("content", "")).strip()
+            ).strip()
+            items.append(
+                {
+                    "id": i,
+                    "summary": summary,
+                    "key_facts": metadata.get("key_facts") or [],
+                    "topics": metadata.get("topics") or [],
+                }
+            )
+
+        system_prompt = (
+            "你是记忆整理助手。把多条关于同一主题或会话的零散记忆合并为一条精炼、"
+            "信息无损的记忆摘要。保留所有关键事实与具体细节，去重并消除相互矛盾，"
+            "避免泛化和丢失专有名词。只输出 JSON，不要输出任何其他内容。"
+        )
+        prompt = (
+            f"以下是一组需要合并的记忆（共 {len(items)} 条）：\n"
+            f"{json.dumps(items, ensure_ascii=False, indent=2)}\n\n"
+            "请将它们合并为一条记忆，按如下 JSON 格式输出：\n"
+            '{"summary": "合并后的精炼摘要", "key_facts": ["事实1", "事实2"], '
+            '"topics": ["主题1"], "importance": 0.5}'
+        )
+
+        text = await self._call_llm_with_retry(prompt, system_prompt)
+        data = self._parse_merge_response(text)
+
+        summary = str(data.get("summary", "")).strip()
+        if not summary:
+            raise RuntimeError("合并结果缺少 summary")
+
+        return {
+            "summary": summary,
+            "key_facts": ensure_list(data.get("key_facts", []))[:5],
+            "topics": ensure_list(data.get("topics", []))[:5],
+            "importance": validate_importance(data.get("importance", 0.5)),
+        }
+
+    def _parse_merge_response(self, text: str) -> dict[str, Any]:
+        """解析合并 LLM 响应中的 JSON，失败时抛出异常。"""
+        candidates = [text]
+
+        from ..utils import extract_json_from_response
+
+        extracted = extract_json_from_response(text)
+        if extracted != text.strip():
+            candidates.append(extracted)
+
+        last_error: Exception | None = None
+        for candidate in candidates:
+            for attempt in range(2):
+                try:
+                    data = json.loads(candidate)
+                except (json.JSONDecodeError, TypeError) as e:
+                    last_error = e
+                    if attempt == 0:
+                        candidate = self._try_fix_json(candidate)
+                    continue
+                if isinstance(data, dict):
+                    return data
+                last_error = TypeError("合并结果必须是 JSON 对象")
+                break
+
+        raise RuntimeError(f"合并结果 JSON 解析失败: {last_error}")

@@ -1,5 +1,177 @@
 # 版本与升级
 
+## 2.13.0 · 2026-11-13
+
+2.13.0 是 Dashboard 外观版本：默认外观升级到 macOS 26 Liquid Glass，新增外观面板自定义，并完成一轮样式层收敛——统一设计令牌、清理被皮肤覆盖的重复声明、补齐空状态与卡片留白、按皮肤重做诊断页。无命令、配置项、注入格式与数据库结构变化，无需迁移。
+
+[下载 2.13.0](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/releases/tag/2.13.0)
+
+### 本次更新
+
+- **外观升级**：默认外观为 macOS 26 Liquid Glass——壁纸之上浮动玻璃侧栏与半透明窗口、同心圆角、彩色玻璃图标；系统开启「降低透明度」「增强对比度」时自动转为实色。
+- **外观面板**：可自定义强调色、壁纸（含上传图片）、玻璃强度、圆角、密度、字体和自定义 CSS，支持主题 JSON 导出、导入与恢复默认；外观样式按需加载，不占首屏预算。
+- **样式收敛**：设计令牌统一到 `tokens.css`；删除被皮肤覆盖、永不生效的重复组件声明与死令牌，组件样式收敛为 `art-direction.css` 单份定义；CSS 压缩器去掉声明冒号后的空格。
+- **空状态与卡片**：通用空状态接入记忆表、诊断、提示词与召回页；设置页、系统页、提示词、档案页卡片留白单独放宽，提示词卡片间距 8→12px；诊断页按皮肤重做，页签改为分段控件，裸表格补卡片承载。
+- **修复**：恢复此前被误删的皮肤文件，修复首屏体积门禁失败；修复 1024 宽度记忆表横向溢出、移动端状态标签被裁切、记忆表加载中误显「暂无数据」、诊断页移动端页签消失。
+- **体积**：首屏 gzip 81,834 → 81,597 B（预算 81,920 B）。
+
+### 行为变化
+
+- 默认外观升级为 macOS 26 Liquid Glass；Studio、Paper、Terminal 风格与原有外观仍可在「外观与主题」切换。
+- 无命令、配置项、注入格式或数据库迁移变化，升级后无需重建索引或重新生成 Embedding。
+- 界面密度比 2.12.0 略收紧，卡片留白与侧栏宽度已按可读性单独调整。
+
+### 验证
+
+后端 1,606 项测试、覆盖率 86%、召回 golden set 2 项通过；前端 206 项、首屏体积门禁（gzip 81,597 B / 预算 81,920 B）与 VitePress 构建通过；PR #431、#432、#436 的 CI backend 与 frontend 均通过。
+
+### 安装与升级
+
+1. 停止插件并备份完整数据目录，更新至 2.13.0 后重新启动 AstrBot，并重新打开插件视图。
+2. 无需数据库迁移或重建索引；外观设置保存在浏览器本地，可在「外观与主题」中恢复默认。
+3. 若管理页面样式显示异常，请强制刷新页面以加载新的前端资源。
+
+## 2.12.0 · 2026-11-12
+
+2.12.0 是存储与召回链路性能版本：图路召回、节点匹配、作用域向量召回、原子检索与记忆写入事务都做了一轮定点优化。156 MB 真实库副本上，召回 DB 侧耗时约 90 ms → 10-20 ms，写一条记忆的图侧开销 41 → 26-30 ms。命令、配置、注入格式与数据库结构兼容，无需迁移。
+
+[下载 2.12.0](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/releases/tag/2.12.0)
+
+### 本次更新
+
+- **召回提速**：图路归档过滤与节点探测重写（73-78 ms → 4-14 ms）；1-2 字中文节点匹配改走新增的 bigram 索引（13-19 ms → 1.1 ms）；作用域向量召回改用 IDSelectorBatch 一次过滤（p50 22.1-22.9 ms → 5.6-6.2 ms，每次取回文档行数 3759 → 约 100）；原子检索无命中不再全表 LIKE（16.3 ms → 0.4 ms）。
+- **写入提速**：一条记忆的图数据（旧图删除、节点/边/入口写入、孤儿节点清理）合并为单事务，index_memory 41 → 26-30 ms、连接数 7 → 3；graph_entries.edge_id 补索引后删除单条记忆 489 → 17 ms、批量删 20 条 7.6 s → 0.14 s。
+- **复测工具**：新增 scripts/benchmark_storage_recall.py，可对真实库副本复测图路读取、图写、index_memory 与原子回退路径。
+
+### 行为变化
+
+- 无命令、配置项、注入格式或数据库迁移变化，默认值不变。
+- 升级后首次启动会回填图节点 bigram FTS 索引（1 万节点约 0.7 秒），数据库约增大 2.5 MiB/万节点；之后启动跳过。
+- 旧原文格式的原子 FTS 仍保留 LIKE 回退；切换 recall_engine.tokenizer 后仍按既有说明重建索引。
+
+### 验证
+
+后端 1606 项测试与召回质量 golden set 通过，Ruff 检查与格式化通过；前端未改动；PR #433 的 CI backend 与 frontend 均通过。
+
+### 安装与升级
+
+1. 停止插件并备份完整数据目录，更新至 2.12.0 后重新启动 AstrBot，并重新打开插件视图。
+2. 无需数据库迁移；首次启动自动创建 livingmemory_graph_nodes_bigram_fts 与 graph_entries.edge_id 索引，并回填现有图节点。
+3. 大库首次升级启动会多花几秒建索引，属一次性成本；后续启动无额外开销。
+
+## 2.11.0 · 2026-11-12
+
+2.11.0 扩展了记忆的使用边界：新增外部记忆 API 与 MCP 桥接、版本化用户档案、请求级召回追踪、诊断面板、频道公共记忆与 LLM Provider 回退链，默认外观改为 Liquid Glass，并恢复全量图谱的完整返回。新能力默认保守，外部 API 与频道记忆默认关闭，追踪默认只留在内存；公开命令与既有配置兼容，无需数据库迁移。
+
+[下载 2.11.0](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/releases/tag/2.11.0)
+
+### 本次更新
+
+- **外部记忆 API**：本机 HTTP 接口支持健康检查、人格列表、召回、写入（`idempotency_key` 幂等）、单条读取与软归档；Key 仅存哈希，支持读/写权限、人格与作用域限定和每分钟限流，审计写入 `external_api_audit.jsonl`；提供 `/lmem apikey` 命令与零依赖 MCP bridge（`search_memory`、`save_memory`、`list_personas`）。默认关闭。
+- **用户档案**：按作用域与人格维护 `basic` / `preferences` / `status` / `task_preferences` 四区档案，带版本历史与待确认候选；Dashboard 可浏览、编辑、删除与审核，注入上限 300 字符且不占召回名额。
+- **召回追踪**：记录各检索路线的候选与耗时、过滤原因与最终注入规模；`/lmem trace` 与「诊断」页可查，并支持记忆血缘（来源消息、取代链、图关联）。
+- **诊断面板**：新增「诊断」页，集中展示召回追踪、频道记忆、外部 API Key 与审计、LLM 用量与回退链。
+- **频道公共记忆**：群聊可开启频道作用域，群内总结进入频道池，群聊召回联合个人与频道作用域并保留保底槽位；默认关闭，不迁移已有数据。
+- **Provider 回退**：新增有序备用 Provider 链与单 Provider 调用超时，主 Provider 超时、限流、5xx 或鉴权失败时自动切换；`/lmem status` 与诊断页显示回退次数。
+- **外观与图谱**：默认外观改为 Liquid Glass（浮动玻璃导航、连续圆角、大幅 2D 图谱区），原有风格仍可切换；全量图谱恢复包含归档记忆与关系、不再截断，3D 星系布局恢复。
+- **修复**：外部 API 路由分发、Key 吊销 POST 别名、外部 API 禁用态展示、响应式控件图标与全量图谱加载确认。
+
+### 行为变化
+
+- 默认外观变为 Liquid Glass；原 Editorial（原野）风格仍保留在「外观与主题」中。
+- 用户档案默认启用，总结会生成档案并注入不超过 300 字符；可在 `profile_settings.enabled` 关闭。
+- 召回追踪默认启用，但只保留最近 50 条在内存、不保存查询原文；需要落盘时开启 `trace_settings.persist_enabled`。
+- 全量图谱恢复完整返回（含归档记忆与关系、不按节点/关系数截断）：这是对 2.10.0 行为的撤回，大库首次加载更慢，仍保留二次确认与取消。
+- 外部记忆 API 与频道公共记忆默认关闭；开启外部 API 会在本机启动独立 HTTP 监听（默认 `127.0.0.1:7801`）。
+- 新增数据表以幂等 `CREATE TABLE IF NOT EXISTS` 创建，升级自动完成，无需迁移。
+
+### 验证
+
+后端测试 1,600 项、前端测试 203 项通过；Ruff、Dashboard 产物检查（首屏 gzip 80,297 B，预算 81,920 B）与 VitePress 构建通过。
+
+### 安装与升级
+
+1. 停止插件并备份完整数据目录，更新至 `2.11.0` 后重新启动 AstrBot，并重新打开插件视图。
+2. 无需数据库迁移；首次启动会自动创建 `memory_profiles`、`memory_profile_history`、`external_api_keys`、`external_api_idempotency` 四张新表。
+3. 如不需要用户档案，关闭 `profile_settings.enabled`；不需要追踪时关闭 `trace_settings.enabled`。
+4. 需要外部 Agent 读写记忆时，开启 `external_api.enabled`，用 `/lmem apikey create` 创建 Key，并按[外部记忆 API](/external-api)配置 MCP bridge。
+5. 全量图谱仍保留加载确认；大库日常浏览建议使用默认受限子图。
+
+## 2.10.0 · 2026-11-09
+
+2.10.0 修正召回噪声与记忆保留策略，降低总结与注入成本，补齐数据体检、质量评测与工程门禁，并修复工具调用轮次丢失、全量图谱失控与备份无限增长等问题。多项默认值有调整，升级前请阅读下方“行为变化”。
+
+[下载 2.10.0](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/releases/tag/2.10.0)
+
+### 本次更新
+
+- **记忆召回**：默认相似度门槛 0.45、近期槽位默认关闭、注入预算 3000/400；总结模板压缩约 70%，无关记忆不再大量注入。
+- **生命周期**：清理默认改为归档（120 天/重要性 0.25），衰减 0.005、保护阈值 0.6；新增 supersede 数据通路；解析失败与低质量总结不再入库。
+- **成本与性能**：仅瞬时错误才重试、反思路并发上限 2、写入复用 embedding；BM25/原子检索连接复用；Atom FTS、networkx 与 FAISS 启动问题修复；新增可选 builtin 分词器。
+- **运维诊断**：新增 `/lmem diag` 与 `/lmem diag compact`；未就绪时页面快速失败并显示横幅；备份启动时自动清理（保留最近 2 份版本备份、总量 512 MB）。
+- **图谱与界面**：全量图谱排除归档并限制 5000 节点/20000 关系，前端增加确认、进度与取消；首屏 gzip −15.2%，设置页与可访问性改进。
+- **工程化**：main.py 覆盖率 97%、后端覆盖率 86%；新增召回质量离线评测与 coverage/docs CI 门禁；依赖补上界并声明宿主版本范围。
+
+### 行为变化
+
+- 低重要性记忆默认归档而非删除；召回门槛与近期槽位默认值变化，可通过配置回退。
+- 全量图谱不再显示归档记忆，超限会截断并提示；工具调用轮助手文字开始入库。
+- 升级后首次启动会清理历史备份，请先手动备份完整数据目录；切换 builtin 分词器后需重建索引。
+- 自主回忆默认预算收紧为每请求 3 次调用/6000 字符；会话空闲约 60 分钟后下一轮会补一次总结。
+
+### 验证
+
+完整后端测试 1,375 项、前端测试 179 项通过，覆盖率 86%；Ruff、Dashboard 产物检查、VitePress 构建与文档检查通过。
+
+### 安装与升级
+
+1. 停止插件并手动备份完整数据目录（本版本会开始自动清理旧备份）。
+2. 更新至 `2.10.0` 后重新启动 AstrBot，并重新打开插件视图；无需数据库迁移。
+3. 如召回结果变少，可把 `recall_engine.min_similarity_for_retrieval` 调回 `0`、`recent_memory_count` 调回 `2` 后观察。
+4. 如切换到 `builtin` 分词器，执行一次 `/lmem rebuild-index`；默认 `jieba` 无需重建。
+5. 运行 `/lmem diag` 可查看数据库、备份与索引状态；`/lmem diag compact` 可压缩数据库文件。
+
+## 2.9.2 · 2026-11-09
+
+2.9.2 收敛插件内部模块结构并修复 Docker Desktop 共享挂载上 SQLite WAL 不可用导致的记忆写入失败。命令、配置项、页面 API、Agent 工具与数据库结构保持不变，无需迁移数据库。
+
+[下载 2.9.2](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/releases/tag/2.9.2)
+
+### 本次更新
+
+- **Docker/WAL 回退**：数据库目录位于 Docker Desktop 宿主盘 bind mount（9p/drvfs、gRPC-FUSE、virtiofs）或网络共享时，SQLite 无法可靠映射 WAL 的 `-shm` 共享内存索引，新建连接会报 `SQLITE_IOERR`（`disk I/O error`），记忆写入随之中断。现在启动时识别挂载类型并探测 WAL，不可用时自动把已有 WAL 库安全转回 rollback journal 并提示迁移数据目录；迁移到 Docker 命名卷或本地磁盘后自动恢复 WAL。见 [#398](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/pull/398)。
+- **连接策略**：journal mode 在启动期对每个库设置一次，BM25、原子、图谱与会话存储的热路径连接只设置 `busy_timeout`，避免新连接在并发提交时立即返回 `database is locked`。
+- **旧平台导入**：导入或迁移的记忆会把已停用的平台前缀重映射为当前平台标识，旧数据导入后仍能按会话召回。见 [#396](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/pull/396)。
+- **内部重构**：合并拆散的存储与处理器模块，`MemoryEngine` 按职责拆分，初始化器 3 个文件收敛为 2 个，页面路由改为声明式注册，删除未使用导出与死代码，生产 Python 代码减少约 1,849 行；检索写入并入引擎写事务，CI 增加 Ruff 门禁，3D 图谱场景改为懒加载。见 [#396](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/pull/396)。
+
+以上改动由 [@lxfight](https://github.com/lxfight) 贡献。最新完整测试：后端 1,210 项、前端 150 项通过；新增回归覆盖文件系统 WAL 探测与回退转换、热路径连接策略和旧平台前缀导入。
+
+### 安装与升级
+
+1. 停止插件并备份完整数据目录，更新至 `2.9.2` 后重新启动 AstrBot 并重新打开插件视图。无需数据库迁移。
+2. 数据目录位于 Docker Desktop 宿主盘 bind mount 或网络共享时，启动日志会提示回退 rollback journal；把 `/AstrBot/data` 迁移到 Docker 命名卷或本地磁盘后会自动恢复 WAL。
+3. 配置存在非法值时，本版本启动会直接失败并给出 `ConfigurationError`，请修正后再启动；旧注入方式配置值仍可读取，设置页统一为 `extra_user_content`。
+4. [#345](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/issues/345) 的 `unable to open database file` 是文件打开失败，与本版本处理的 `disk I/O error` 仍属两类问题，保持开放。
+
+## 2.9.1 · 2026-11-05
+
+2.9.1 修复记忆注入缺少参与者稳定标识，以及定时任务、后台任务等合成唤醒混入真实对话记忆的问题。无需迁移数据库或调整配置。
+
+[下载 2.9.1](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/releases/tag/2.9.1)
+
+### 本次更新
+
+- **参与者稳定标识**：注入文本的 `Participants` 行优先读取 `participant_identities`，按“昵称#账号后四位”渲染，同名用户可区分、改名后仍能认出是同一人；账号只保留尾四位。机器人自身显示为“我”，无身份记录的旧记忆沿用昵称列表。修复 [#388](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/issues/388)，见 [#391](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/pull/391)。
+- **反思窗口来源**：定时任务、后台任务与插件唤醒不再写入会话历史，不会进入反思窗口，也不改变消息总数、总结游标和未总结轮数。新版 AstrBot 的 `agent_wakeup` 事件与 4.29.4 及更早的 `cron` 平台事件都会被识别并跳过。修复 [#389](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/issues/389)，见 [#392](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/pull/392)。
+
+以上改动由 [@lxfight](https://github.com/lxfight) 贡献。最新完整测试：后端 1,211 项、前端 150 项通过；新增回归覆盖同名/改名参与者与两类合成唤醒来源。
+
+### 安装与升级
+
+1. 停止插件并备份数据目录，更新至 `2.9.1` 后重新启动 AstrBot 并重新打开插件视图。无需数据库迁移或配置调整。
+2. 修复只作用于升级后新产生的消息；之前已写入会话历史的定时任务/后台任务记录仍会保留，可按需清理或重新总结。
+3. [#345](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/issues/345) 的数据库文件打开失败仍需新增诊断日志定位，保持开放。
+
 ## 2.9.0 · 2026-11-03
 
 2.9.0 新增适配器互通与旧记忆归属迁移，并修复反思积压、消息裁剪和整合隔离问题。已有向量与文档 ID 保留，无需重新生成 Embedding。

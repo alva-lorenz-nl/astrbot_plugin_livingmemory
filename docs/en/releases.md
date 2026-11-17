@@ -1,5 +1,177 @@
 # Releases and Upgrades
 
+## 2.13.0 · November 13, 2026
+
+2.13.0 is a dashboard appearance release: the default look is upgraded to macOS 26 Liquid Glass, the appearance panel gains customization, and the style layer is consolidated — unified design tokens, duplicated declarations covered by the skin removed, empty states and card spacing filled in, and the diagnostics page rebuilt on the skin. No command, configuration, injection format or database schema changes and no migration.
+
+[Download 2.13.0](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/releases/tag/2.13.0)
+
+### What changed
+
+- **Appearance upgrade**: macOS 26 Liquid Glass is the default — a floating glass sidebar and translucent window over the wallpaper, continuous corners and colored glass icons; Reduce Transparency and Increase Contrast switch surfaces to solid automatically.
+- **Appearance panel**: customize the accent color, wallpaper (including uploads), glass strength, corners, density, font and custom CSS, with theme JSON export, import and reset; panel styles load on demand outside the first-load budget.
+- **Style consolidation**: design tokens live in tokens.css; duplicated component declarations and dead tokens that the skin already overrides are gone, leaving art-direction.css as the single component definition; the CSS minifier drops the space after declaration colons.
+- **Empty states and cards**: a shared empty-state component now covers the memory table, diagnostics, prompts and recall; card spacing is loosened on settings, system, prompts and profiles (prompt cards 8 -> 12px), and the diagnostics page is rebuilt on the skin with segmented tabs and card surfaces for standalone tables.
+- **Fixes**: restore the skin file that a previous commit had deleted (which broke the build and the first-load budget gate); fix the memory table overflowing at 1024 px, clipped status pills on mobile, the stale "no data" row while loading, and the diagnostics tab strip collapsing on mobile.
+- **Size**: first-load gzip 81,834 -> 81,597 B against an 81,920 B budget.
+
+### Behavior changes
+
+- The default appearance is now macOS 26 Liquid Glass; Studio, Paper and Terminal styles and the previous appearances remain selectable under Appearance.
+- No command, configuration, injection format or database migration changes; no index rebuild or re-embedding is needed after upgrading.
+- UI density is slightly tighter than 2.12.0, with card spacing and the sidebar width adjusted separately for readability.
+
+### Verification
+
+Backend: 1,606 tests, 86% coverage and both recall golden-set checks pass; frontend: 206 tests, the first-load budget gate (81,597 B gzip against 81,920 B) and the VitePress build pass; CI backend and frontend pass on PRs #431, #432 and #436.
+
+### Installing and upgrading
+
+1. Stop the plugin and back up the full data directory, update to 2.13.0, then restart AstrBot and reopen the plugin views.
+2. No database migration or index rebuild is required; appearance settings are stored in the browser and can be reset from Appearance.
+3. If the dashboard looks stale after upgrading, hard-refresh the page to load the new front-end assets.
+
+## 2.12.0 · November 12, 2026
+
+2.12.0 is a storage and recall-chain performance release: graph-route recall, node matching, scoped vector recall, atom search and graph writes were optimized end to end. On a copy of a 156 MB production database, database-side recall time drops from about 90 ms to 10-20 ms and the graph write cost per memory drops from 41 ms to 26-30 ms. Commands, configuration, injection format and database schema stay compatible, and no migration is required.
+
+[Download 2.12.0](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/releases/tag/2.12.0)
+
+### What changed
+
+- **Faster recall**: the graph route filters archived memories through the indexed status expression and probes only matched nodes (73-78 ms -> 4-14 ms); 1-2 character CJK node matches go through a new bigram FTS index (13-19 ms -> 1.1 ms); scoped vector recall filters candidates with IDSelectorBatch before the ANN search (p50 22.1-22.9 ms -> 5.6-6.2 ms, rows fetched per query 3759 -> about 100); the atom miss path no longer scans content with LIKE (16.3 ms -> 0.4 ms).
+- **Faster writes**: one memory's graph data (old graph deletion, node/edge/entry writes and orphan cleanup) is committed in a single transaction, so index_memory drops from 41 to 26-30 ms and connections per write from 7 to 3; indexing graph_entries.edge_id drops single-memory deletion from 489 to 17 ms and a batch of 20 from 7.6 s to 0.14 s.
+- **Benchmark tooling**: new scripts/benchmark_storage_recall.py measures the graph read path, graph writes, index_memory and the atom fallback against a real database copy.
+
+### Behavior changes
+
+- No command, configuration, injection format or database migration changes; defaults stay the same.
+- The first start after the upgrade backfills the graph node bigram FTS index (about 0.7 s for 10k nodes) and the database grows by about 2.5 MiB per 10k nodes; later starts skip it.
+- Raw-format atom FTS keeps the LIKE fallback; after switching recall_engine.tokenizer, rebuild indexes as before.
+
+### Verification
+
+1606 backend tests and the recall quality golden set pass, Ruff check and format pass, no frontend changes, and both backend and frontend CI jobs pass on PR #433.
+
+### Installing and upgrading
+
+1. Stop the plugin and back up the full data directory, update to 2.12.0, then restart AstrBot and reopen the plugin views.
+2. No database migration is required; the first start creates livingmemory_graph_nodes_bigram_fts and the graph_entries.edge_id index and backfills existing graph nodes.
+3. Large stores spend a few extra seconds building the index on the first upgraded start (one-time cost); later starts have no extra overhead.
+
+## 2.11.0 · November 12, 2026
+
+2.11.0 extends what you can do with memory: an authenticated external memory API with an MCP bridge, versioned user profiles, request-level recall traces, a diagnostics page, channel public memory and an ordered LLM provider fallback chain, a Liquid Glass default appearance, and the complete full-graph view restored. New capabilities are conservative by default: the external API and channel memory are off and traces stay in memory. Public commands and existing configuration remain compatible, and no database migration is required.
+
+[Download 2.11.0](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/releases/tag/2.11.0)
+
+### What changed
+
+- **External memory API**: a local HTTP interface for health, personas, recall, write (`idempotency_key`), single-memory read and soft archive; keys are stored as hashes with read/write permissions, persona and scope limits and per-minute rate limits, plus an audit log at `external_api_audit.jsonl`; includes `/lmem apikey` commands and a dependency-free MCP bridge (`search_memory`, `save_memory`, `list_personas`). Disabled by default.
+- **User profiles**: structured `basic` / `preferences` / `status` / `task_preferences` profiles per scope and persona, with version history and pending candidates; the dashboard supports browsing, editing, deleting and reviewing, and injection is capped at 300 characters outside the recall budget.
+- **Recall traces**: per-route candidates and latency, filter reasons and final injection size; inspect them with `/lmem trace` or the diagnostics page, together with memory lineage (source messages, supersede chain, graph links).
+- **Diagnostics page**: one place for recall traces, channel memory, external API keys and audit, and LLM usage with the fallback chain.
+- **Channel public memory**: group chats can enable a channel scope so group summaries land in a shared pool and group recall queries both scopes with guaranteed slots; disabled by default, with no data migration.
+- **Provider fallback**: an ordered fallback chain and a per-provider call timeout, switching on timeout, rate limit, 5xx or auth failure; `/lmem status` and the diagnostics page report fallback counts.
+- **Appearance and graph**: Liquid Glass is the new default (floating glass navigation, continuous corners, large 2D graph workspace) while all existing styles remain selectable; the full graph again includes archived memories and relations without truncation, restoring the 3D galaxy layout.
+- **Fixes**: external API route dispatch, the POST alias for key revocation, the disabled state of the external API tab, responsive control icons and the full-graph load confirmation.
+
+### Behavior changes
+
+- The default appearance is now Liquid Glass; the previous Editorial style remains available under Appearance.
+- User profiles are enabled by default and summaries generate profiles injected as up to 300 characters; turn off `profile_settings.enabled` to disable them.
+- Recall traces are enabled by default but kept in memory (latest 50, no query text); enable `trace_settings.persist_enabled` for JSONL persistence.
+- The full graph returns complete data again (archived memories and relations, no node or relation cap): this reverts the 2.10.0 behavior, so first loads on large stores are heavier; the confirmation and cancel steps remain.
+- The external memory API and channel public memory are disabled by default; enabling the external API starts a local HTTP listener (default `127.0.0.1:7801`).
+- New tables are created idempotently with `CREATE TABLE IF NOT EXISTS`; upgrades need no migration.
+
+### Verification
+
+Backend tests: 1,600 passed; frontend tests: 203 passed. Ruff, the dashboard artifact check (first-load gzip 80,297 B against an 81,920 B budget) and the VitePress build pass.
+
+### Installing and upgrading
+
+1. Stop the plugin and back up the full data directory, update to `2.11.0`, then restart AstrBot and reopen the plugin views.
+2. No database migration is required; the first start creates `memory_profiles`, `memory_profile_history`, `external_api_keys` and `external_api_idempotency`.
+3. Turn off `profile_settings.enabled` if profiles are not needed, and `trace_settings.enabled` if traces are not needed.
+4. To let an external agent read and write memory, enable `external_api.enabled`, create a key with `/lmem apikey create`, and configure the MCP bridge as described in [External memory API](/en/external-api).
+5. The full graph still asks for confirmation; prefer the default bounded subgraph for everyday browsing of large stores.
+
+## 2.10.0 · November 9, 2026
+
+2.10.0 fixes recall noise and the memory-retention policy, cuts summary and injection cost, adds data diagnostics, recall-quality evaluation and engineering gates, and fixes lost tool-call turns, unbounded full-graph loads and ever-growing backups. Several defaults changed; read "Behavior changes" before upgrading.
+
+[Download 2.10.0](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/releases/tag/2.10.0)
+
+### What changed
+
+- **Recall**: default similarity gate 0.45, recent-memory slots off by default and a 3000/400 injection budget; reflection templates are ~70% smaller, so unrelated memories are no longer injected in bulk.
+- **Lifecycle**: cleanup now archives by default (120 days / importance 0.25), with 0.005 decay and a 0.6 protection threshold; a supersede data path is available; failed parsing and low-quality summaries are no longer stored.
+- **Cost and performance**: only transient errors retry, reflection concurrency is capped at 2 and writes reuse the dedup embedding; BM25/atom retrieval reuse read connections; Atom FTS, networkx and FAISS startup paths are fixed; an optional builtin tokenizer is available.
+- **Ops and diagnostics**: new `/lmem diag` and `/lmem diag compact`; pages fail fast with a banner while unready; backups are pruned at startup (2 newest version backups, 512 MB total cap).
+- **Graph and UI**: full graph excludes archived memories and caps at 5000 nodes / 20000 relations, with confirm, progress and cancel; first-load gzip −15.2%; settings and accessibility improvements.
+- **Engineering**: main.py coverage 97%, backend coverage 86%; offline recall-quality evaluation plus coverage/docs CI gates; dependency upper bounds and a declared host version range.
+
+### Behavior changes
+
+- Low-importance memories are archived instead of deleted; recall-gate and recent-slot defaults changed and can be reverted through configuration.
+- Full graph no longer shows archived memories and truncates above the caps; assistant text from tool-call turns is now stored.
+- The first startup after upgrading prunes historical backups, so back up the full data directory first; switching to the builtin tokenizer requires a rebuild-index.
+- Agentic recall defaults shrink to 3 calls / 6000 characters per request; an idle session gets one catch-up summary on its next turn after about 60 minutes.
+
+### Verification
+
+The complete suite passes 1,375 backend and 179 frontend tests with 86% coverage; Ruff, the dashboard bundle check, the VitePress build and docs checks pass.
+
+### Install and upgrade
+
+1. Stop the plugin and manually back up the full data directory (this version starts pruning old backups).
+2. Update to `2.10.0`, restart AstrBot and reopen the plugin views; no database migration is required.
+3. If recall becomes too sparse, set `recall_engine.min_similarity_for_retrieval` back to `0` and `recent_memory_count` back to `2`.
+4. If you switch to the `builtin` tokenizer, run `/lmem rebuild-index` once; the default `jieba` needs no rebuild.
+5. Run `/lmem diag` to inspect database, backup and index status; `/lmem diag compact` compacts the database file.
+
+## 2.9.2 · November 9, 2026
+
+2.9.2 consolidates the plugin's internal modules and fixes memory writes failing when SQLite WAL is unavailable on Docker Desktop shared mounts. Commands, configuration keys, page APIs, agent tools and the database schema are unchanged; no migration is required.
+
+[Download 2.9.2](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/releases/tag/2.9.2)
+
+### What changed
+
+- **Docker/WAL fallback**: when the data directory lives on a Docker Desktop bind mount of a host disk (9p/drvfs, gRPC-FUSE, virtiofs) or a network share, SQLite cannot reliably map WAL's `-shm` shared-memory index, so new connections fail with `SQLITE_IOERR` (`disk I/O error`) and memory writes break. Startup now detects the mount type and probes WAL, safely converts existing WAL databases back to rollback journal when it is unavailable, and suggests moving the data directory; moving to a Docker named volume or a local disk restores WAL automatically. See [#398](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/pull/398).
+- **Connection policy**: journal mode is applied once per database at startup, and hot-path connections in BM25, atom, graph and conversation storage only set `busy_timeout`, preventing new connections from returning `database is locked` immediately when another commit is in flight.
+- **Legacy platform import**: imported or migrated memories remap retired platform prefixes to the current platform identity, so old data remains recallable in session-filtered recall. See [#396](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/pull/396).
+- **Internal refactor**: merged split storage and processor modules, regrouped `MemoryEngine` by responsibility, reduced the initializer from three files to two, made page routes declarative, removed unused exports and dead code (about 1,849 production Python lines), moved document writes into the engine write transaction, added the Ruff gate to CI and lazy-loads the 3D graph scene. See [#396](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/pull/396).
+
+Contributed by [@lxfight](https://github.com/lxfight). The latest complete suite passed 1,210 backend and 150 frontend tests. New regressions cover filesystem WAL probing and fallback conversion, hot-path connection policy and legacy platform-prefix imports.
+
+### Install and upgrade
+
+1. Stop the plugin, back up its full data directory, update to `2.9.2`, then restart AstrBot and reopen Plugin Views. No database migration is required.
+2. If the data directory is on a Docker Desktop host-disk bind mount or a network share, startup logs will report the rollback-journal fallback; move `/AstrBot/data` to a Docker named volume or a local disk to restore WAL.
+3. Invalid configuration values now abort startup with `ConfigurationError` instead of being silently normalized; fix them before starting. Legacy injection-method values are still read, but settings expose only `extra_user_content`.
+4. The database file-open failure `unable to open database file` in [#345](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/issues/345) remains a separate issue from the `disk I/O error` handled here and stays open.
+
+## 2.9.1 · November 5, 2026
+
+2.9.1 fixes missing stable participant identities in memory injection and keeps synthetic cron and background-task wakeups out of real conversation memory. No database migration or configuration change is required.
+
+[Download 2.9.1](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/releases/tag/2.9.1)
+
+### What changed
+
+- **Stable participant identities**: the injected `Participants` line now reads `participant_identities` and renders nickname#last4, so users sharing a nickname can be told apart and renamed users keep the same suffix. Only the last four characters of an account ID are exposed; bot identities render as “我” and memories without identity records keep the nickname list. Fixes [#388](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/issues/388), see [#391](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/pull/391).
+- **Reflection source**: cron, background-task and plugin wakeups are no longer written to conversation history, so they do not enter the reflection window or change message counts, summary cursors and unsummarized rounds. Both newer `agent_wakeup` events and the `cron` platform used by 4.29.4 and earlier are skipped. Fixes [#389](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/issues/389), see [#392](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/pull/392).
+
+Contributed by [@lxfight](https://github.com/lxfight). The latest complete suite passed 1,211 backend and 150 frontend tests. New regressions cover same-name and renamed participants plus both synthetic wakeup sources.
+
+### Install and upgrade
+
+1. Stop the plugin, back up its data directory and update to `2.9.1`, then restart AstrBot and reopen Plugin Views. No database migration or configuration change is required.
+2. The fix applies to messages created after the upgrade; cron and background-task records already written to conversation history remain and can be cleaned up or re-summarized as needed.
+3. The database file-open failure in [#345](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/issues/345) remains open pending new diagnostic logs.
+
 ## 2.9.0 · November 3, 2026
 
 2.9.0 adds adapter sharing and legacy ownership migration, with fixes for reflection backlog, history trimming and consolidation isolation. Existing vectors and document IDs are retained without regenerating embeddings.

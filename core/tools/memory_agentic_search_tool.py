@@ -5,23 +5,24 @@ recall_long_term_memory，与基线工具在注册时二选一，不会并存。
 旧参数组合（query/k/include_source）在 Beta 下继续可用。
 """
 
-from ..memory_scope import adapter_access
 import asyncio
 from dataclasses import field
 from typing import Any
 
 from pydantic.dataclasses import dataclass
 
+from astrbot.api import logger
 from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.agent.tool import FunctionTool, ToolExecResult
 from astrbot.core.astr_agent_context import AstrAgentContext
 
 from ..base.config_manager import ConfigManager
 from ..memory_scope import (
+    adapter_access,
     conversation_visible,
     resolve_memory_scope,
 )
-from ..utils import get_conversation_id
+from ..retrieval.recall_trace import trace_request_context
 from .agentic_recall_budget import (
     get_or_create_budget,
     run_within_budget,
@@ -165,6 +166,7 @@ class AgenticMemorySearchTool(FunctionTool[AstrAgentContext]):
             event,
             recall_session_id,
             recall_persona_id,
+            channel_scope,
             access_error,
         ) = await resolve_tool_access(self.config_manager, self.context, context)
         with adapter_access(self.config_manager, event):
@@ -265,23 +267,37 @@ class AgenticMemorySearchTool(FunctionTool[AstrAgentContext]):
                 requested_k = default_k
             limited_k = max(1, min(requested_k, max_k))
 
+            agentic_kwargs: dict[str, Any] = {
+                "target": normalized_target,
+                "query": cleaned_query,
+                "k": limited_k,
+                "session_id": recall_session_id,
+                "persona_id": recall_persona_id,
+                "identity_key": identity_key,
+            }
+            if channel_scope:
+                agentic_kwargs["extra_scopes"] = [channel_scope]
             try:
-                outcome, _, timed_out = await run_within_budget(
-                    budget,
-                    lambda: self.memory_engine.search_memories_agentic(
-                        target=normalized_target,
-                        query=cleaned_query,
-                        k=limited_k,
-                        session_id=recall_session_id,
-                        persona_id=recall_persona_id,
-                        identity_key=identity_key,
-                        identity_candidates=identity_candidates,
-                        start_ts=start_ts,
-                        end_ts=end_ts,
-                        exclude_ids=exclude_ids or [],
-                        cursor=search_offset or "",
+                with trace_request_context(
+                    session_id=event.unified_msg_origin,
+                    scope=recall_session_id,
+                    persona_id=recall_persona_id,
+                    agentic=True,
+                    budget_truncated=bool(
+                        budget.calls_exhausted or budget.time_exhausted
                     ),
-                )
+                ) as request_trace:
+                    outcome, _, timed_out = await run_within_budget(
+                        budget,
+                        lambda: self.memory_engine.search_memories_agentic(
+                            **agentic_kwargs,
+                            identity_candidates=identity_candidates,
+                            start_ts=start_ts,
+                            end_ts=end_ts,
+                            exclude_ids=exclude_ids or [],
+                            cursor=search_offset or "",
+                        ),
+                    )
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -309,26 +325,38 @@ class AgenticMemorySearchTool(FunctionTool[AstrAgentContext]):
                     }
                 )
 
-            filter_conversation = self.config_manager.get(
-                "filtering_settings.use_conversation_filtering", False
-            )
-            if filter_conversation and outcome.results:
-                fallback_global = self.config_manager.get(
-                    "filtering_settings.fallback_to_global_conversations", True
-                )
-                current_cid = await get_conversation_id(self.context, event)
-                filtered_results = [
-                    m
-                    for m in outcome.results
-                    if conversation_visible(
-                        getattr(m, "metadata", {}) or {},
-                        current_cid,
-                        fallback_to_global=fallback_global,
-                    )
-                ]
-                outcome.results = filtered_results
-
             evidence_by_id: dict[int, dict[str, Any]] = {}
+
+            # 对话线隔离兜底过滤：自主检索路径按当前 conversation_id 再筛一遍
+            if bool(
+                self.config_manager.filtering_settings.get(
+                    "use_conversation_filtering", True
+                )
+            ):
+                from ..utils import get_conversation_id
+
+                current_cid = await get_conversation_id(self.context, event)
+                if current_cid:
+                    fallback_global = bool(
+                        self.config_manager.filtering_settings.get(
+                            "fallback_to_global_conversations", True
+                        )
+                    )
+                    before_count = len(outcome.results)
+                    outcome.results = [
+                        r
+                        for r in outcome.results
+                        if conversation_visible(
+                            getattr(r, "metadata", {}) or {},
+                            current_cid,
+                            fallback_to_global=fallback_global,
+                        )
+                    ]
+                    if len(outcome.results) < before_count:
+                        logger.info(
+                            f"[agentic] 经对话线隔离过滤，记忆从 {before_count} "
+                            f"筛选至 {len(outcome.results)} 条 (cid={current_cid})"
+                        )
 
             if include_source and outcome.results:
 
@@ -357,7 +385,7 @@ class AgenticMemorySearchTool(FunctionTool[AstrAgentContext]):
                     for memory in outcome.results:
                         evidence_by_id.setdefault(memory.doc_id, {"status": "timeout"})
 
-            return format_search_result(
+            output = format_search_result(
                 outcome,
                 query=cleaned_query,
                 target=normalized_target,
@@ -370,3 +398,21 @@ class AgenticMemorySearchTool(FunctionTool[AstrAgentContext]):
                 evidence_by_id=evidence_by_id,
                 include_source=include_source,
             )
+            self._record_tool_trace(request_trace, outcome.results, output)
+            return output
+
+    def _record_tool_trace(self, request_trace, results, output) -> None:
+        """把 Beta 工具返回的命中写回本次 agentic trace。"""
+        recorder = getattr(self.memory_engine, "trace_recorder", None)
+        trace_id = getattr(request_trace, "trace_id", None)
+        if recorder is None or not trace_id:
+            return
+        injected = [
+            {
+                "doc_id": getattr(memory, "doc_id", None),
+                "score": getattr(memory, "final_score", None),
+                "chars": len(str(getattr(memory, "content", "") or "")),
+            }
+            for memory in results
+        ]
+        recorder.update_injected(trace_id, injected, len(output or ""))

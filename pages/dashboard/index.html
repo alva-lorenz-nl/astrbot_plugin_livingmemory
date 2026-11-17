@@ -6,7 +6,6 @@
     <meta name="color-scheme" content="light dark" />
     <title data-i18n="page.title">LivingMemory</title>
     <link rel="stylesheet" href="./assets/styles.min.css" />
-    <link id="graph-3d-module" rel="modulepreload" href="./assets/graph-3d.min.js" />
     <script src="./assets/base.min.js"></script>
     <script src="./vendor/lucide-subset.js"></script>
   </head>
@@ -15,69 +14,89 @@
       <!-- Sidebar -->
       <aside class="sidebar">
         <div class="sidebar-brand" aria-label="LivingMemory">
-          <span class="brand-mark">LM</span>
-          <span class="brand-name"><strong>Living</strong><strong>Memory</strong></span>
+          <span class="brand-mark" aria-hidden="true"><i data-lucide="network"></i></span>
+          <span class="brand-name">LivingMemory</span>
         </div>
-        <nav class="sidebar-nav">
-          <button class="nav-item active" data-page="graph" data-i18n-aria="nav.graph">
-            <i data-lucide="network" aria-hidden="true"></i>
-            <span data-i18n="nav.graph">Knowledge Graph</span>
-          </button>
-          <button class="nav-item" data-page="memory" data-i18n-aria="nav.memory">
-            <i data-lucide="database" aria-hidden="true"></i>
-            <span data-i18n="nav.memory">Memories</span>
-          </button>
-          <button class="nav-item" data-page="recall" data-i18n-aria="nav.recall">
-            <i data-lucide="scan-search" aria-hidden="true"></i>
-            <span data-i18n="nav.recall">Recall Test</span>
-          </button>
-          <button class="nav-item" data-page="system" data-i18n-aria="nav.system">
-            <i data-lucide="chart-no-axes-combined" aria-hidden="true"></i>
-            <span data-i18n="nav.system">System</span>
-          </button>
-          <button class="nav-item" data-page="prompts" data-i18n-aria="nav.prompts">
-            <i data-lucide="braces" aria-hidden="true"></i>
-            <span data-i18n="nav.prompts">Prompts</span>
-          </button>
-          <button class="nav-item" data-page="settings" data-i18n-aria="nav.settings">
-            <i data-lucide="palette" aria-hidden="true"></i>
-            <span data-i18n="nav.settings">Settings</span>
-          </button>
-        </nav>
-        <div class="sidebar-divider"></div>
-        <div class="sidebar-footer">
-          <button class="nav-item" id="theme-toggle" data-i18n-aria="header.theme" aria-haspopup="dialog" aria-controls="appearance-dialog">
-            <i data-lucide="palette" aria-hidden="true"></i>
-            <span data-i18n="header.theme">Theme</span>
-          </button>
-          <details class="lang-menu" id="lang-menu">
-          <summary class="nav-item" id="lang-toggle" data-i18n-aria="header.lang">
-            <i data-lucide="languages" aria-hidden="true"></i>
-            <span id="lang-label" data-i18n="header.lang">Language</span>
-          </summary>
-          <div class="lang-options">
-            <button type="button" class="lang-option" data-lang="zh">中文</button>
-            <button type="button" class="lang-option" data-lang="en">English</button>
-            <button type="button" class="lang-option" data-lang="ru">Русский</button>
-            <button type="button" class="lang-option" data-lang="ja">日本語</button>
+        <button class="btn btn-secondary" id="sidebar-toggle" type="button" aria-expanded="false" aria-controls="sidebar-menu">
+          <i data-lucide="x" aria-hidden="true"></i><span data-i18n="nav.menu">Menu</span>
+        </button>
+        <div class="sidebar-menu" id="sidebar-menu">
+          <nav class="sidebar-nav" data-i18n-aria="nav.menu">
+            <button class="nav-item active" data-page="graph" data-i18n-aria="nav.graph">
+              <i data-lucide="network" aria-hidden="true"></i>
+              <span data-i18n="nav.graph">Knowledge Graph</span>
+            </button>
+            <button class="nav-item" data-page="memory" data-i18n-aria="nav.memory">
+              <i data-lucide="database" aria-hidden="true"></i>
+              <span data-i18n="nav.memory">Memories</span>
+            </button>
+            <button class="nav-item" data-page="recall" data-i18n-aria="nav.recall">
+              <i data-lucide="scan-search" aria-hidden="true"></i>
+              <span data-i18n="nav.recall">Recall Test</span>
+            </button>
+            <button class="nav-item" data-page="system" data-i18n-aria="nav.system">
+              <i data-lucide="chart-no-axes-combined" aria-hidden="true"></i>
+              <span data-i18n="nav.system">System</span>
+            </button>
+            <button class="nav-item" data-page="prompts" data-i18n-aria="nav.prompts">
+              <i data-lucide="braces" aria-hidden="true"></i>
+              <span data-i18n="nav.prompts">Prompts</span>
+            </button>
+            <button class="nav-item" data-page="profile" data-i18n-aria="nav.profile">
+              <i data-lucide="user" aria-hidden="true"></i>
+              <span data-i18n="nav.profile">Profiles</span>
+            </button>
+            <button class="nav-item" data-page="diagnostics" data-i18n-aria="nav.diagnostics">
+              <i data-lucide="chart-no-axes-combined" aria-hidden="true"></i>
+              <span data-i18n="nav.diagnostics">Diagnostics</span>
+            </button>
+            <button class="nav-item" data-page="settings" data-i18n-aria="nav.settings">
+              <i data-lucide="palette" aria-hidden="true"></i>
+              <span data-i18n="nav.settings">Settings</span>
+            </button>
+          </nav>
+          <div class="sidebar-divider"></div>
+          <div class="sidebar-footer">
+            <button class="nav-item" id="theme-toggle" data-i18n-aria="header.theme" aria-haspopup="dialog" aria-controls="appearance-dialog">
+              <i data-lucide="palette" aria-hidden="true"></i>
+              <span data-i18n="header.theme">Theme</span>
+            </button>
+            <details class="lang-menu" id="lang-menu">
+              <summary class="nav-item" id="lang-toggle" data-i18n-aria="header.lang">
+                <i data-lucide="languages" aria-hidden="true"></i>
+                <span id="lang-label" data-i18n="header.lang">Language</span>
+              </summary>
+              <div class="lang-options">
+                <button type="button" class="lang-option" data-lang="zh">中文</button>
+                <button type="button" class="lang-option" data-lang="en">English</button>
+                <button type="button" class="lang-option" data-lang="ru">Русский</button>
+                <button type="button" class="lang-option" data-lang="ja">日本語</button>
+              </div>
+            </details>
           </div>
-          </details>
         </div>
       </aside>
 
       <!-- Main Content -->
       <main class="main-content">
 
+        <!-- 插件初始化/Provider 未就绪时的全局指引，就绪后自动收起 -->
+        <div id="not-ready-banner" class="request-feedback" role="status" aria-live="polite" hidden>
+          <span id="not-ready-banner-message"></span>
+          <button type="button" class="btn btn-sm btn-secondary" id="not-ready-retry" data-i18n="common.retry">Retry</button>
+        </div>
+
         <!-- Page: Graph -->
         <section class="page active" id="page-graph">
           <header class="page-header">
-            <div class="page-heading"><span class="page-index">01</span><span class="page-title" data-i18n="nav.graph">Knowledge Graph</span></div>
+            <div class="page-heading"><h1 class="page-title" data-i18n="nav.graph">Knowledge Graph</h1></div>
             <div class="page-actions">
               <select id="graph-view-mode" class="input input-sm" data-i18n-aria="graph.viewMode" style="width:auto">
                 <option value="2d" data-i18n="graph.view2d">2D</option>
                 <option value="3d" data-i18n="graph.view3d">3D</option>
               </select>
               <button class="btn btn-secondary btn-sm" id="graph-reset-view" data-i18n="graph.resetView">Reset view</button>
+              <button class="btn btn-secondary btn-sm" id="graph-node-list-btn" type="button" data-i18n="graph.nodeList">Node list</button>
               <input type="text" id="graph-session-filter" list="graph-session-options" data-i18n-aria="graph.sessionPh" class="input input-sm" data-i18n-placeholder="graph.sessionPh" placeholder="Session ID" style="width:180px" />
               <datalist id="graph-session-options"></datalist>
               <button class="btn btn-secondary btn-sm" id="graph-overview-btn" data-i18n-aria="graph.overviewBtn">
@@ -93,14 +112,6 @@
               <div class="stat-pill"><div class="stat-pill-value" id="gs-edges">--</div><div class="stat-pill-label" data-i18n="graph.edges">relations</div></div>
               <div class="stat-pill"><div class="stat-pill-value" id="gs-sessions">--</div><div class="stat-pill-label" data-i18n="stats.sessions">sessions</div></div>
             </div>
-            <div class="graph-canvas-container" style="flex:1">
-              <div class="graph-canvas-state" id="graph-canvas-state"></div>
-              <div id="graph-canvas" class="graph-canvas">
-                <div id="graph-view-2d" class="graph-view"></div>
-                <div id="graph-view-3d" class="graph-view" hidden></div>
-              </div>
-            </div>
-            <div class="graph-legend" id="graph-legend"></div>
             <div class="graph-toolbar">
               <div class="graph-operation">
                 <input type="text" id="graph-query-input" data-i18n-aria="graph.queryPh" class="input" data-i18n-placeholder="graph.queryPh" placeholder="Search entities, topics, or memories..." />
@@ -109,6 +120,17 @@
                   <span data-i18n="graph.searchBtn">Search</span>
                 </button>
               </div>
+            </div>
+            <div class="graph-canvas-container">
+              <div class="graph-canvas-state" id="graph-canvas-state" role="status" aria-live="polite"></div>
+              <div id="graph-canvas" class="graph-canvas">
+                <div id="graph-view-2d" class="graph-view"></div>
+                <div id="graph-view-3d" class="graph-view" data-module="./assets/graph-3d.min.js" hidden></div>
+              </div>
+            </div>
+            <div class="graph-footer">
+              <div class="graph-legend" id="graph-legend"></div>
+              <span class="graph-query-result" id="graph-query-result" role="status"></span>
             </div>
             <div id="graph-space-controls" class="graph-space-controls" hidden>
               <button id="graph-motion-btn" class="btn btn-secondary btn-sm" data-i18n="graph.pauseMotion" aria-pressed="false">Pause motion</button>
@@ -120,7 +142,7 @@
         <!-- Page: Memory -->
         <section class="page" id="page-memory">
           <header class="page-header">
-            <div class="page-heading"><span class="page-index">02</span><span class="page-title" data-i18n="nav.memory">Memories</span></div>
+            <div class="page-heading"><h1 class="page-title" data-i18n="nav.memory">Memories</h1></div>
             <button id="mem-refresh" class="btn btn-secondary btn-sm"><i data-lucide="refresh-cw" aria-hidden="true"></i><span data-i18n="common.refresh">Refresh</span></button>
           </header>
           <div class="page-body memory-page-body">
@@ -248,7 +270,7 @@
         <!-- Page: Recall Test -->
         <section class="page" id="page-recall">
           <header class="page-header">
-            <div class="page-heading"><span class="page-index">03</span><span class="page-title" data-i18n="nav.recall">Recall Test</span></div>
+            <div class="page-heading"><h1 class="page-title" data-i18n="nav.recall">Recall Test</h1></div>
           </header>
           <div class="page-body">
             <div class="recall-form-section">
@@ -282,7 +304,7 @@
         <!-- Page: System -->
         <section class="page" id="page-system">
           <header class="page-header">
-            <div class="page-heading"><span class="page-index">04</span><span class="page-title" data-i18n="nav.system">System Overview</span></div>
+            <div class="page-heading"><h1 class="page-title" data-i18n="nav.system">System Overview</h1></div>
           </header>
           <div class="page-body">
             <div id="system-feedback" class="request-feedback" role="status" aria-live="polite" hidden>
@@ -334,7 +356,7 @@
         <!-- Page: Prompts -->
         <section class="page" id="page-prompts">
           <header class="page-header">
-            <div class="page-heading"><span class="page-index">05</span><span class="page-title" data-i18n="nav.prompts">Prompt Management</span></div>
+            <div class="page-heading"><h1 class="page-title" data-i18n="nav.prompts">Prompt Management</h1></div>
           </header>
           <div class="page-body">
             <div id="prompt-feedback" class="request-feedback" role="status" aria-live="polite" hidden>
@@ -362,10 +384,27 @@
           </div>
         </section>
 
+        <!-- Page: Profiles (lazy-loaded module renders into #profile-container) -->
+        <section class="page" id="page-profile">
+          <header class="page-header">
+            <div class="page-heading"><h1 class="page-title" data-i18n="nav.profile">Profiles</h1></div>
+          </header>
+          <div class="page-body">
+            <div id="profile-feedback" class="request-feedback" role="status" aria-live="polite" hidden>
+              <span id="profile-feedback-message"></span>
+              <button id="profile-retry" class="btn btn-sm btn-secondary" type="button" data-i18n="common.retry" hidden>Retry</button>
+            </div>
+            <div id="profile-container"></div>
+          </div>
+        </section>
+
+        <!-- Page: Diagnostics (lazy-loaded module renders into the section) -->
+        <section class="page" id="page-diagnostics"></section>
+
         <!-- Page: Settings (advanced config moved out of the host page) -->
         <section class="page" id="page-settings">
           <header class="page-header">
-            <div class="page-heading"><span class="page-index">06</span><span class="page-title" data-i18n="nav.settings">Settings</span></div>
+            <div class="page-heading"><h1 class="page-title" data-i18n="nav.settings">Settings</h1></div>
           </header>
           <div class="page-body">
             <div id="settings-feedback" class="request-feedback" role="status" aria-live="polite" hidden>
@@ -373,7 +412,6 @@
               <button id="settings-retry" class="btn btn-sm btn-secondary" type="button" data-i18n="common.retry" hidden>Retry</button>
             </div>
             <div class="settings-toolbar">
-              <p class="settings-note" data-i18n="settings.reloadHint">Advanced settings live here instead of the AstrBot plugin config page. Reload the plugin after saving so every component picks them up.</p>
               <div class="settings-actions">
                 <input class="input settings-search" id="settings-search" type="search" data-i18n-placeholder="settings.searchPlaceholder" data-i18n-aria="settings.searchPlaceholder" />
                 <button class="btn btn-secondary btn-sm" id="settings-expand-all" type="button" data-i18n="settings.expandAll">Expand all</button>
@@ -398,59 +436,122 @@
       </form>
     </dialog>
 
+    <!-- 通用二次确认（设置等页面的危险操作；原生 dialog，不依赖 window.confirm） -->
+    <dialog id="action-dialog" class="discard-dialog" aria-labelledby="action-dialog-title" aria-describedby="action-dialog-message">
+      <form method="dialog">
+        <h2 id="action-dialog-title"></h2>
+        <p id="action-dialog-message"></p>
+        <div class="discard-actions">
+          <button class="btn btn-secondary" value="cancel" autofocus data-i18n="common.cancel">Cancel</button>
+          <button class="btn btn-danger" id="action-dialog-confirm" value="confirm" data-i18n="common.confirm">Confirm</button>
+        </div>
+      </form>
+    </dialog>
+
+    <!-- 2D 图谱的无障碍替代入口：按节点列出并可定位 -->
+    <dialog id="graph-node-list-dialog" class="discard-dialog" aria-labelledby="graph-node-list-title">
+      <h2 id="graph-node-list-title" data-i18n="graph.nodeListTitle">Graph node list</h2>
+      <ul id="graph-node-list" class="graph-node-list"></ul>
+      <div class="discard-actions">
+        <button class="btn btn-secondary" id="graph-node-list-close" autofocus data-i18n="common.close">Close</button>
+      </div>
+    </dialog>
+
     <!-- Appearance preferences apply immediately and remain local to this browser. -->
-    <dialog id="appearance-dialog" class="appearance-dialog" aria-labelledby="appearance-title" aria-describedby="appearance-hint">
+    <dialog id="appearance-dialog" class="appearance-dialog" aria-labelledby="appearance-title">
       <form method="dialog">
         <header class="appearance-header">
           <h2 id="appearance-title" data-i18n="header.theme">Appearance</h2>
-          <button class="btn btn-ghost btn-sm" data-i18n-aria="common.close" autofocus><i data-lucide="x" aria-hidden="true"></i></button>
+          <div class="appearance-segmented appearance-tabs">
+            <label><input type="radio" name="appearance-tab" value="theme" checked /><span data-i18n="appearance.tabTheme">Theme</span></label>
+            <label><input type="radio" name="appearance-tab" value="advanced" /><span data-i18n="appearance.tabAdvanced">Advanced</span></label>
+          </div>
+          <button class="btn btn-primary btn-sm" data-i18n="common.close" autofocus>Close</button>
         </header>
-        <p id="appearance-hint" data-i18n="appearance.hint">Changes apply immediately and are saved in this browser.</p>
-        <fieldset>
-          <legend data-i18n="appearance.style">Visual style</legend>
-          <div class="appearance-styles">
+        <div class="appearance-pane" data-pane="theme">
+          <fieldset>
+            <legend data-i18n="appearance.style">Visual style</legend>
+            <div class="appearance-styles">
             <label class="appearance-card">
-              <input type="radio" name="appearance-style" value="editorial" />
-              <span class="appearance-preview preview-editorial" aria-hidden="true"><span class="preview-nav"></span><span class="preview-main"><span></span><span></span><span></span></span></span>
-              <strong data-i18n="appearance.editorial">Editorial</strong>
-              <span class="appearance-description" data-i18n="appearance.editorialDesc"></span>
+              <input type="radio" name="appearance-style" value="macos" />
+              <span class="appearance-preview preview-macos" aria-hidden="true"><span class="preview-nav"></span><span class="preview-main"><span></span><span></span><span></span></span></span>
+              <strong data-i18n="appearance.macos">macOS 26</strong>
             </label>
             <label class="appearance-card">
               <input type="radio" name="appearance-style" value="studio" />
               <span class="appearance-preview preview-studio" aria-hidden="true"><span class="preview-nav"></span><span class="preview-main"><span></span><span></span><span></span></span></span>
               <strong data-i18n="appearance.studio">Studio</strong>
-              <span class="appearance-description" data-i18n="appearance.studioDesc"></span>
             </label>
             <label class="appearance-card">
               <input type="radio" name="appearance-style" value="paper" />
               <span class="appearance-preview preview-paper" aria-hidden="true"><span class="preview-nav"></span><span class="preview-main"><span></span><span></span><span></span></span></span>
               <strong data-i18n="appearance.paper">Paper</strong>
-              <span class="appearance-description" data-i18n="appearance.paperDesc"></span>
             </label>
             <label class="appearance-card">
               <input type="radio" name="appearance-style" value="terminal" />
               <span class="appearance-preview preview-terminal" aria-hidden="true"><span class="preview-nav"></span><span class="preview-main"><span></span><span></span><span></span></span></span>
               <strong data-i18n="appearance.terminal">Terminal</strong>
-              <span class="appearance-description" data-i18n="appearance.terminalDesc"></span>
             </label>
+            </div>
+          </fieldset>
+          <fieldset>
+            <legend data-i18n="appearance.mode">Color mode</legend>
+            <div class="appearance-segmented"><label><input type="radio" name="appearance-mode" value="system" /><span data-i18n="appearance.system">Auto</span></label><label><input type="radio" name="appearance-mode" value="light" /><span data-i18n="appearance.light">Light</span></label><label><input type="radio" name="appearance-mode" value="dark" /><span data-i18n="appearance.dark">Dark</span></label></div>
+          </fieldset>
+          <fieldset>
+            <legend data-i18n="appearance.accent">Accent color</legend>
+            <div class="appearance-swatches">
+              <label class="appearance-swatch appearance-swatch-default"><input type="radio" name="appearance-accent" value="" data-i18n-aria="appearance.optDefault" checked /><span></span></label>
+              <label class="appearance-swatch" style="--swatch:#007aff"><input type="radio" name="appearance-accent" value="#007aff" aria-label="#007aff" /><span></span></label>
+              <label class="appearance-swatch" style="--swatch:#af52de"><input type="radio" name="appearance-accent" value="#af52de" aria-label="#af52de" /><span></span></label>
+              <label class="appearance-swatch" style="--swatch:#ff2d92"><input type="radio" name="appearance-accent" value="#ff2d92" aria-label="#ff2d92" /><span></span></label>
+              <label class="appearance-swatch" style="--swatch:#ff3b30"><input type="radio" name="appearance-accent" value="#ff3b30" aria-label="#ff3b30" /><span></span></label>
+              <label class="appearance-swatch" style="--swatch:#ff9500"><input type="radio" name="appearance-accent" value="#ff9500" aria-label="#ff9500" /><span></span></label>
+              <label class="appearance-swatch" style="--swatch:#ffcc00"><input type="radio" name="appearance-accent" value="#ffcc00" aria-label="#ffcc00" /><span></span></label>
+              <label class="appearance-swatch" style="--swatch:#34c759"><input type="radio" name="appearance-accent" value="#34c759" aria-label="#34c759" /><span></span></label>
+              <label class="appearance-swatch" style="--swatch:#8e8e93"><input type="radio" name="appearance-accent" value="#8e8e93" aria-label="#8e8e93" /><span></span></label>
+              <label class="appearance-swatch appearance-swatch-custom"><input type="color" name="appearance-accent-custom" value="#007aff" data-i18n-aria="appearance.accentCustom" /><span></span></label>
+            </div>
+          </fieldset>
+          <fieldset>
+            <legend data-i18n="appearance.wallpaper">Wallpaper</legend>
+            <div class="appearance-swatches">
+              <label class="appearance-swatch appearance-swatch-default"><input type="radio" name="appearance-wallpaper" value="" data-i18n-aria="appearance.optDefault" checked /><span></span></label>
+              <label class="appearance-swatch appearance-wp appearance-wp-aurora"><input type="radio" name="appearance-wallpaper" value="aurora" data-i18n-aria="appearance.wp.aurora" /><span></span></label>
+              <label class="appearance-swatch appearance-wp appearance-wp-dusk"><input type="radio" name="appearance-wallpaper" value="dusk" data-i18n-aria="appearance.wp.dusk" /><span></span></label>
+              <label class="appearance-swatch appearance-wp appearance-wp-forest"><input type="radio" name="appearance-wallpaper" value="forest" data-i18n-aria="appearance.wp.forest" /><span></span></label>
+              <label class="appearance-swatch appearance-wp appearance-wp-graphite"><input type="radio" name="appearance-wallpaper" value="graphite" data-i18n-aria="appearance.wp.graphite" /><span></span></label>
+              <label class="appearance-swatch appearance-wp appearance-wp-none"><input type="radio" name="appearance-wallpaper" value="none" data-i18n-aria="appearance.wp.none" /><span></span></label>
+              <label class="appearance-swatch appearance-wp appearance-wp-image" id="appearance-wp-image" hidden><input type="radio" name="appearance-wallpaper" value="image" data-i18n-aria="appearance.wp.image" /><span></span></label>
+              <label class="btn btn-secondary btn-sm appearance-upload"><input type="file" name="appearance-wallpaper-file" accept="image/*" hidden /><i data-lucide="upload" aria-hidden="true"></i><span data-i18n="appearance.upload">Image</span></label>
+            </div>
+          </fieldset>
+          <fieldset class="appearance-rows">
+            <div class="appearance-row"><label for="appearance-glass" data-i18n="appearance.glass">Glass</label><input type="range" id="appearance-glass" name="appearance-glass" min="0" max="100" step="1" /></div>
+            <div class="appearance-row"><span data-i18n="appearance.radius">Corners</span><div class="appearance-segmented"><label><input type="radio" name="appearance-radius" value="" /><span data-i18n="appearance.optDefault">Default</span></label><label><input type="radio" name="appearance-radius" value="sharp" /><span data-i18n="appearance.optSharp">Sharp</span></label><label><input type="radio" name="appearance-radius" value="round" /><span data-i18n="appearance.optRound">Round</span></label></div></div>
+            <div class="appearance-row"><span data-i18n="appearance.density">Density</span><div class="appearance-segmented"><label><input type="radio" name="appearance-density" value="compact" /><span data-i18n="appearance.optCompact">Compact</span></label><label><input type="radio" name="appearance-density" value="" /><span data-i18n="appearance.optDefault">Default</span></label><label><input type="radio" name="appearance-density" value="spacious" /><span data-i18n="appearance.optSpacious">Spacious</span></label></div></div>
+            <div class="appearance-row"><span data-i18n="appearance.font">Font</span><div class="appearance-segmented"><label><input type="radio" name="appearance-font" value="" /><span data-i18n="appearance.optDefault">Default</span></label><label><input type="radio" name="appearance-font" value="serif" /><span data-i18n="appearance.optSerif">Serif</span></label><label><input type="radio" name="appearance-font" value="mono" /><span data-i18n="appearance.optMono">Mono</span></label></div></div>
+          </fieldset>
+        </div>
+        <div class="appearance-pane" data-pane="advanced">
+          <fieldset>
+            <legend data-i18n="appearance.css">Custom CSS</legend>
+            <textarea id="appearance-css" name="appearance-css" class="input textarea appearance-css" rows="12" spellcheck="false" autocapitalize="off" autocomplete="off" data-i18n-aria="appearance.css"></textarea>
+          </fieldset>
+          <div class="appearance-actions">
+            <button type="button" class="btn btn-secondary btn-sm" id="appearance-export"><i data-lucide="download" aria-hidden="true"></i><span data-i18n="appearance.export">Export</span></button>
+            <button type="button" class="btn btn-secondary btn-sm" id="appearance-import"><i data-lucide="upload" aria-hidden="true"></i><span data-i18n="appearance.import">Import</span></button>
+            <input type="file" id="appearance-import-file" accept=".json,application/json" hidden />
+            <button type="button" class="btn btn-ghost btn-sm" id="appearance-reset"><i data-lucide="rotate-ccw" aria-hidden="true"></i><span data-i18n="appearance.reset">Reset</span></button>
+            <span id="appearance-status" role="status"></span>
           </div>
-        </fieldset>
-        <fieldset>
-          <legend data-i18n="appearance.mode">Color mode</legend>
-          <div class="appearance-modes">
-            <label><input type="radio" name="appearance-mode" value="system" /><span data-i18n="appearance.system">Auto</span></label>
-            <label><input type="radio" name="appearance-mode" value="light" /><span data-i18n="appearance.light">Light</span></label>
-            <label><input type="radio" name="appearance-mode" value="dark" /><span data-i18n="appearance.dark">Dark</span></label>
-          </div>
-          <p class="appearance-mode-hint" data-i18n="appearance.systemHint">Auto follows AstrBot, or your device when opened independently.</p>
-        </fieldset>
-        <footer class="appearance-footer"><button class="btn btn-primary" data-i18n="common.close">Close</button></footer>
+        </div>
       </form>
     </dialog>
 
     <!-- Peek Panel -->
     <div class="peek-overlay" id="peek-overlay"></div>
-    <aside class="peek-panel" id="peek-panel" aria-hidden="true" inert>
+    <aside class="peek-panel" id="peek-panel" role="dialog" aria-modal="true" aria-labelledby="peek-title" aria-hidden="true" inert>
       <div class="peek-header">
         <div>
           <div id="peek-badge"></div>
@@ -467,6 +568,6 @@
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
     <script src="./assets/graph.min.js"></script>
-    <script type="module" src="./app.js"></script>
+    <script type="module" src="./assets/app.min.js"></script>
   </body>
 </html>
